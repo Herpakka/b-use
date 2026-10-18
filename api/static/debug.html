@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Browser Agent Debug</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #677085; --line: #e2e5eb;
+    --accent: #2f6fde; --ok: #1f8a4c; --warn: #b26a00; --bad: #c2362d; --code: #f0f2f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1a1f27; --text: #e4e7ee; --muted: #8d96a8; --line: #2a313c;
+      --accent: #6b9bff; --ok: #4cc27e; --warn: #e3a33b; --bad: #ff6b60; --code: #222833;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", "Noto Sans Thai", sans-serif; }
+  header { display: flex; gap: 12px; align-items: center; padding: 10px 16px;
+           border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0 12px 0 0; }
+  main { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+            padding: 14px; min-width: 0; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+       margin: 0 0 10px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px; }
+  input, textarea { width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px;
+                    background: var(--bg); color: var(--text); font: inherit; }
+  textarea { resize: vertical; min-height: 64px; }
+  button { padding: 7px 12px; border-radius: 6px; border: 1px solid var(--line);
+           background: var(--panel); color: var(--text); font: inherit; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--bad); }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .stack > * + * { margin-top: 16px; }
+  .runs { list-style: none; margin: 0; padding: 0; max-height: 420px; overflow: auto; }
+  .runs li { padding: 8px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+  .runs li:hover { background: var(--bg); }
+  .runs li.active { border-color: var(--accent); }
+  .runs .task { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px;
+           border: 1px solid currentColor; }
+  .s-done { color: var(--ok); } .s-failed, .s-cancelled { color: var(--bad); }
+  .s-needs_human { color: var(--warn); } .s-running, .s-queued { color: var(--accent); }
+  .detail { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+  @media (max-width: 1200px) { .detail { grid-template-columns: 1fr; } }
+  .shot { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--bg);
+          min-height: 180px; object-fit: contain; }
+  .log { font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; background: var(--code);
+         border-radius: 6px; padding: 8px; max-height: 520px; overflow: auto; white-space: pre-wrap;
+         word-break: break-word; }
+  .log .ev { padding: 2px 0; border-bottom: 1px dashed var(--line); }
+  .log .t { color: var(--accent); }
+  .human { border: 1px solid var(--warn); border-radius: 8px; padding: 12px; }
+  .human h3 { margin: 0 0 6px; font-size: 14px; color: var(--warn); }
+  .result { background: var(--code); border-radius: 6px; padding: 8px; white-space: pre-wrap; }
+  .error { color: var(--bad); font-size: 12px; min-height: 1em; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Browser Agent · debug</h1>
+  <label for="key" class="muted" style="margin:0">API key</label>
+  <input id="key" type="password" autocomplete="off" style="width:280px" placeholder="BU_API_KEYS key">
+  <button id="save-key">Use key</button>
+  <span id="auth-state" class="muted"></span>
+</header>
+<main>
+  <div class="stack">
+    <section>
+      <h2>New run</h2>
+      <form id="new-run">
+        <label for="task">Task</label>
+        <textarea id="task" required placeholder="What is the price of 'A Light in the Attic'?"></textarea>
+        <label for="domains">Allowed domains (comma separated)</label>
+        <input id="domains" required placeholder="books.toscrape.com">
+        <label for="start">Start URL (optional)</label>
+        <input id="start" placeholder="https://books.toscrape.com/">
+        <label for="session">Session name (optional — keeps logins between runs)</label>
+        <input id="session" pattern="[A-Za-z0-9_-]{1,40}">
+        <div class="row" style="margin-top:10px">
+          <label class="row" style="margin:0"><input id="vision" type="checkbox" style="width:auto"> vision</label>
+          <button class="primary" type="submit">Start</button>
+        </div>
+        <div id="new-error" class="error"></div>
+      </form>
+    </section>
+    <section>
+      <div class="row" style="justify-content:space-between"><h2>Runs</h2><button id="refresh">↻</button></div>
+      <ul id="runs" class="runs"></ul>
+    </section>
+  </div>
+  <section id="run" class="hidden">
+    <div class="row" style="justify-content:space-between">
+      <div style="min-width:0">
+        <div class="row"><span id="r-status" class="badge"></span><code id="r-id" class="muted"></code></div>
+        <div id="r-task" style="margin-top:6px;font-weight:600"></div>
+        <div id="r-meta" class="muted"></div>
+      </div>
+      <div class="row">
+        <button id="live-toggle">Live view</button>
+        <button id="cancel" class="danger">Cancel</button>
+      </div>
+    </div>
+    <div id="human" class="human hidden" style="margin-top:12px">
+      <h3 id="h-title"></h3>
+      <div id="h-body"></div>
+      <label for="h-answer">Answer / note (optional)</label>
+      <textarea id="h-answer"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button id="h-approve" class="primary">Approve</button>
+        <button id="h-deny" class="danger">Deny</button>
+        <button id="h-reply" class="primary">Send answer</button>
+      </div>
+      <div id="h-error" class="error"></div>
+    </div>
+    <div id="r-result" class="result hidden" style="margin-top:12px"></div>
+    <div class="detail" style="margin-top:12px">
+      <div>
+        <h2 id="shot-label">Latest screenshot</h2>
+        <img id="shot" class="shot" alt="browser view">
+      </div>
+      <div>
+        <h2>Events</h2>
+        <div id="log" class="log"></div>
+      </div>
+    </div>
+  </section>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const store = {
+  get key() { try { return localStorage.getItem("bu.key") || ""; } catch { return ""; } },
+  set key(v) { try { localStorage.setItem("bu.key", v); } catch {} },
+};
+let current = null;      // run id shown
+let streamAbort = null;  // AbortController of the SSE fetch
+let live = null;         // WebSocket of the live view
+let shotUrl = null;
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    ...options,
+    headers: { "Authorization": `Bearer ${store.key}`, "Content-Type": "application/json",
+               ...(options.headers || {}) },
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch {}
+    throw new Error(`${res.status}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
+  }
+  return res;
+}
+
+function text(el, value) { el.textContent = value == null ? "" : String(value); }
+function fmtCost(v) { return `$${Number(v || 0).toFixed(4)}`; }
+
+async function loadRuns() {
+  if (!store.key) { text($("auth-state"), "enter an API key"); return; }
+  try {
+    const runs = await (await api("/v1/runs?limit=50")).json();
+    text($("auth-state"), "✓ connected");
+    const ul = $("runs");
+    ul.replaceChildren(...runs.map((r) => {
+      const li = document.createElement("li");
+      li.className = r.id === current ? "active" : "";
+      const top = document.createElement("div");
+      top.className = "row";
+      const badge = document.createElement("span");
+      badge.className = `badge s-${r.status}`;
+      text(badge, r.status);
+      const meta = document.createElement("span");
+      meta.className = "muted";
+      text(meta, `${r.steps} steps · ${fmtCost(r.cost_usd)}`);
+      top.append(badge, meta);
+      const task = document.createElement("div");
+      task.className = "task";
+      text(task, r.task);
+      li.append(top, task);
+      li.onclick = () => selectRun(r.id);
+      return li;
+    }));
+  } catch (e) { text($("auth-state"), e.message); }
+}
+
+async function refreshRun() {
+  if (!current) return;
+  const r = await (await api(`/v1/runs/${current}`)).json();
+  const badge = $("r-status");
+  badge.className = `badge s-${r.status}`;
+  text(badge, r.status);
+  text($("r-id"), r.id);
+  text($("r-task"), r.task);
+  text($("r-meta"), `${r.allowed_domains.join(", ")} · session ${r.session} · ${r.steps} steps · ` +
+    `${fmtCost(r.cost_usd)} · ${r.tokens_in} in / ${r.tokens_out} out tokens`);
+  $("cancel").disabled = ["done", "failed", "cancelled"].includes(r.status);
+  const res = $("r-result");
+  if (r.result || r.failure_reason) {
+    res.classList.remove("hidden");
+    text(res, r.result ? r.result : `✖ ${r.failure_reason}`);
+  } else res.classList.add("hidden");
+  renderHuman(r);
+}
+
+function renderHuman(r) {
+  const box = $("human");
+  if (r.status !== "needs_human" || !r.pending) { box.classList.add("hidden"); return; }
+  box.classList.remove("hidden");
+  const p = r.pending;
+  const isQuestion = p.kind === "question";
+  text($("h-title"), isQuestion ? "The agent asks" : "Approval needed");
+  const body = $("h-body");
+  body.replaceChildren();
+  const main = document.createElement("div");
+  main.style.fontWeight = "600";
+  text(main, isQuestion ? p.question : p.action);
+  const sub = document.createElement("div");
+  sub.className = "muted";
+  text(sub, [p.reason, p.url].filter(Boolean).join(" · "));
+  body.append(main, sub);
+  $("h-approve").classList.toggle("hidden", isQuestion);
+  $("h-deny").classList.toggle("hidden", isQuestion);
+  $("h-reply").classList.toggle("hidden", !isQuestion);
+  text($("h-error"), "");
+}
+
+async function respond(approved) {
+  try {
+    await api(`/v1/runs/${current}/resume`, {
+      method: "POST", body: JSON.stringify({ approved, answer: $("h-answer").value }),
+    });
+    $("h-answer").value = "";
+    $("human").classList.add("hidden");
+  } catch (e) { text($("h-error"), e.message); }
+}
+
+async function refreshShot() {
+  if (!current || live) return;
+  try {
+    const blob = await (await api(`/v1/runs/${current}/screenshot`)).blob();
+    if (shotUrl) URL.revokeObjectURL(shotUrl);
+    shotUrl = URL.createObjectURL(blob);
+    $("shot").src = shotUrl;
+  } catch { /* no screenshot yet */ }
+}
+
+function logEvent(ev) {
+  const div = document.createElement("div");
+  div.className = "ev";
+  const t = document.createElement("span");
+  t.className = "t";
+  text(t, `#${ev.id} ${ev.type} `);
+  const d = ev.data || {};
+  const summary = d.line || d.url || (d.tool ? `${d.tool} ${JSON.stringify(d.args)}` : null)
+    || (d.plan ? d.plan.map((g, i) => `${i + 1}. ${g}`).join("  ") : null)
+    || d.reason || d.question || d.action || d.status || JSON.stringify(d);
+  div.append(t, document.createTextNode(summary));
+  $("log").append(div);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+async function follow(runId) {
+  if (streamAbort) streamAbort.abort();
+  const ctrl = new AbortController();
+  streamAbort = ctrl;
+  let lastId = 0;
+  // fetch() instead of EventSource: EventSource cannot send the Authorization header.
+  while (!ctrl.signal.aborted) {
+    try {
+      const res = await api(`/v1/runs/${runId}/stream`, {
+        signal: ctrl.signal, headers: lastId ? { "Last-Event-ID": String(lastId) } : {},
+      });
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let cut;
+        while ((cut = buf.indexOf("\n\n")) >= 0) {
+          const frame = buf.slice(0, cut);
+          buf = buf.slice(cut + 2);
+          const ev = { data: {} };
+          for (const line of frame.split("\n")) {
+            if (line.startsWith("id: ")) ev.id = Number(line.slice(4));
+            else if (line.startsWith("event: ")) ev.type = line.slice(7);
+            else if (line.startsWith("data: ")) ev.data = JSON.parse(line.slice(6));
+          }
+          if (!ev.type) continue;  // comment / heartbeat
+          lastId = ev.id;
+          logEvent(ev);
+          if (["step", "needs_human", "finished", "status", "resumed"].includes(ev.type)) {
+            refreshRun(); refreshShot();
+          }
+          if (ev.type === "finished") { loadRuns(); return; }
+        }
+      }
+      return;  // stream ended normally
+    } catch (e) {
+      if (ctrl.signal.aborted) return;
+      await new Promise((r) => setTimeout(r, 2000));  // reconnect with Last-Event-ID
+    }
+  }
+}
+
+function stopLive() {
+  if (live) { live.close(); live = null; }
+  text($("live-toggle"), "Live view");
+  text($("shot-label"), "Latest screenshot");
+}
+
+function startLive() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}/v1/runs/${current}/live`, [`bu.key.${store.key}`]);
+  ws.binaryType = "blob";
+  ws.onmessage = (m) => {
+    if (shotUrl) URL.revokeObjectURL(shotUrl);
+    shotUrl = URL.createObjectURL(m.data);
+    $("shot").src = shotUrl;
+  };
+  ws.onclose = () => { if (live === ws) { stopLive(); refreshShot(); } };
+  live = ws;
+  text($("live-toggle"), "Stop live view");
+  text($("shot-label"), "Live view");
+}
+
+async function selectRun(runId) {
+  stopLive();
+  current = runId;
+  $("run").classList.remove("hidden");
+  $("log").replaceChildren();
+  $("shot").removeAttribute("src");
+  await refreshRun();
+  refreshShot();
+  loadRuns();
+  follow(runId);
+}
+
+$("save-key").onclick = () => { store.key = $("key").value.trim(); loadRuns(); };
+$("refresh").onclick = loadRuns;
+$("h-approve").onclick = () => respond(true);
+$("h-deny").onclick = () => respond(false);
+$("h-reply").onclick = () => respond(true);
+$("live-toggle").onclick = () => (live ? stopLive() : startLive());
+$("cancel").onclick = async () => {
+  try { await api(`/v1/runs/${current}/cancel`, { method: "POST" }); refreshRun(); loadRuns(); }
+  catch (e) { alert(e.message); }
+};
+$("new-run").onsubmit = async (e) => {
+  e.preventDefault();
+  text($("new-error"), "");
+  const body = {
+    task: $("task").value.trim(),
+    allowed_domains: $("domains").value.split(",").map((d) => d.trim()).filter(Boolean),
+    vision: $("vision").checked,
+  };
+  if ($("start").value.trim()) body.start_url = $("start").value.trim();
+  if ($("session").value.trim()) body.session = $("session").value.trim();
+  try {
+    const run = await (await api("/v1/runs", { method: "POST", body: JSON.stringify(body) })).json();
+    selectRun(run.id);
+  } catch (err) { text($("new-error"), err.message); }
+};
+
+$("key").value = store.key;
+loadRuns();
+setInterval(loadRuns, 10000);
+</script>
+</body>
+</html>

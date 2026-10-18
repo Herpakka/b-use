@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 
 from browser.pool import BrowserPool
 from browser.session import BrowserSession
@@ -12,15 +13,31 @@ from core.config import Settings
 from tests.browser_utils import FIXTURE_DOMAINS, serve_fixtures
 
 
+class IsolatedSettings(Settings):
+    """Settings from explicit arguments only. Neither the environment nor .env may leak in:
+    pydantic-settings deep-merges dict fields across sources, and inside the container .env
+    arrives as environment variables (e.g. BU_BROWSER_WS_ENDPOINT would hijack the tests)."""
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (init_settings,)
+
+
 def make_settings(tmp: Path, **overrides: object) -> Settings:
-    """Defaults + overrides only: model_validate skips the env/.env sources entirely."""
     values: dict[str, object] = {
         "env": "test",
         "sessions_dir": tmp,
         "reaper_interval_s": 3600,
         **overrides,
     }
-    return Settings.model_validate(values)
+    return IsolatedSettings.model_validate(values)
 
 
 @pytest.fixture(scope="session")

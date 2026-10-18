@@ -14,6 +14,7 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 from types import TracebackType
+from urllib.parse import urlsplit
 
 from playwright.async_api import Browser, Playwright, async_playwright
 
@@ -29,6 +30,19 @@ _SESSION_ID = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
 class PoolExhaustedError(RuntimeError):
     pass
+
+
+def loopback_host_header(endpoint: str) -> dict[str, str]:
+    """Playwright's browser server, when bound to loopback, only accepts loopback Host headers
+    (DNS-rebinding guard). Docker Desktop forwards host.docker.internal to the host's loopback,
+    so present ourselves as localhost."""
+    port = urlsplit(endpoint).port
+    return {"Host": f"localhost:{port}"} if port else {}
+
+
+def redact_endpoint(endpoint: str) -> str:
+    parts = urlsplit(endpoint)
+    return f"{parts.scheme}://{parts.netloc}/…"
 
 
 class BrowserPool:
@@ -55,7 +69,14 @@ class BrowserPool:
 
     async def start(self) -> None:
         self._pw = await async_playwright().start()
-        await self._launch()
+        try:
+            await self._launch()
+        except Exception as err:
+            if not self.settings.browser_ws_endpoint:
+                raise
+            # A remote browser may simply not be up yet; connect on the first session instead
+            # of refusing to start the whole service.
+            log.warning("remote_browser_unavailable", error=str(err).splitlines()[0][:200])
         self._reaper = asyncio.create_task(self._reap_loop(), name="browser-reaper")
 
     async def stop(self) -> None:
@@ -74,6 +95,18 @@ class BrowserPool:
 
     async def _launch(self) -> Browser:
         assert self._pw is not None, "BrowserPool.start() was not called"
+        if endpoint := self.settings.browser_ws_endpoint:
+            # A browser someone else runs (e.g. a visible Chromium on the developer's desktop,
+            # see devtools/browser_host.py). Contexts, routes and CDP all work over the link.
+            self._browser = await self._pw.chromium.connect(
+                endpoint, timeout=15_000, headers=loopback_host_header(endpoint)
+            )
+            log.info(
+                "chromium_connected",
+                version=self._browser.version,
+                endpoint=redact_endpoint(endpoint),
+            )
+            return self._browser
         self._browser = await self._pw.chromium.launch(
             headless=self.settings.headless,
             args=["--disable-dev-shm-usage"],
@@ -83,7 +116,8 @@ class BrowserPool:
 
     async def _ensure_browser(self) -> Browser:
         if self._browser is None or not self._browser.is_connected():
-            log.warning("chromium_relaunch", sessions_lost=len(self._sessions))
+            if self._browser is not None:
+                log.warning("chromium_relaunch", sessions_lost=len(self._sessions))
             for session in self._sessions.values():
                 session.closed = True
                 self._slots.release()
@@ -98,6 +132,9 @@ class BrowserPool:
     @property
     def active(self) -> int:
         return len(self._sessions)
+
+    def sessions(self) -> list[BrowserSession]:
+        return [s for s in self._sessions.values() if not s.closed]
 
     def storage_path(self, session_id: str) -> Path:
         return self.settings.sessions_dir / f"{session_id}.json"

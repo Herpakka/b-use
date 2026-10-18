@@ -35,8 +35,22 @@ class Settings(BaseSettings):
     # --- infra
     database_url: str = "postgresql://bu:bu@localhost:5432/bu"
     redis_url: str = "redis://localhost:6379/0"
+    # "redis" shares live events and rate-limit counters across processes; "local" is one process.
+    event_bus: Literal["redis", "local"] = "redis"
+
+    # --- API
+    # API key → tenant, as JSON: BU_API_KEYS={"<long random key>": "acme"}. Empty = API refuses.
+    api_keys: dict[str, str] = Field(default_factory=dict)
+    rate_limit_per_minute: int = 120
+    max_active_runs_per_tenant: int = 3
+    max_budget_usd: float = 1.0  # cap on a per-run budget a client may request
+    sse_heartbeat_s: float = 15
+    debug_page: bool = True
 
     # --- browser
+    # Drive a browser served elsewhere instead of launching one, e.g. the visible Chromium from
+    # `python -m devtools.browser_host`: ws://host.docker.internal:3010/<token>
+    browser_ws_endpoint: str | None = None
     headless: bool = True
     max_contexts: int = 4
     pool_acquire_timeout_s: float = 30

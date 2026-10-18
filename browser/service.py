@@ -6,11 +6,11 @@ without the agent changing.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from typing import Protocol
 
 from browser.actions import AnyAction
-from browser.models import ActionResult, Observation
+from browser.models import ActionResult, Observation, SessionInfo
 
 
 class SessionNotFoundError(LookupError):
@@ -33,3 +33,9 @@ class BrowserService(Protocol):
     async def screenshot(self, session_id: str) -> bytes: ...
 
     async def close(self, session_id: str) -> None: ...
+
+    async def list_sessions(self) -> list[SessionInfo]: ...
+
+    def screencast(self, session_id: str) -> AsyncIterator[bytes]:
+        """Live JPEG frames; raises SessionNotFoundError when iterated if the id is unknown."""
+        ...

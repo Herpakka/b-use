@@ -107,6 +107,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "langchain-core" },
     { name = "langchain-openai" },
     { name = "langgraph" },
@@ -123,7 +124,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "import-linter" },
     { name = "mypy" },
     { name = "psutil" },
@@ -137,6 +137,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.143" },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "langchain-core", specifier = ">=1.6" },
     { name = "langchain-openai", specifier = ">=1.7" },
     { name = "langgraph", specifier = ">=1.2.16" },
@@ -153,7 +154,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx", specifier = ">=0.28" },
     { name = "import-linter", specifier = ">=2.15" },
     { name = "mypy", specifier = ">=2.4" },
     { name = "psutil", specifier = ">=7.2" },

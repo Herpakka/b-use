@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import itertools
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from langchain_core.callbacks import CallbackManagerForLLMRun
+from langchain_core.callbacks import AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel, LanguageModelInput
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.messages.ai import UsageMetadata
@@ -21,11 +22,12 @@ from agent.context import AgentContext
 from agent.graph import AgentGraph, compile_graph
 from agent.runner import HumanHandler, drive, initial_state, limits_from
 from browser.actions import AnyAction, Extract, Navigate
-from browser.models import ActionResult, ElementInfo, Observation, ScrollState
+from browser.models import ActionResult, ElementInfo, Observation, ScrollState, SessionInfo
 from browser.service import SessionNotFoundError
 from core.costs import PriceTable
 from tests.conftest import make_settings
 
+JPEG_MAGIC = bytes([0xFF, 0xD8, 0xFF])
 USAGE = UsageMetadata(input_tokens=1000, output_tokens=50, total_tokens=1050)
 _ids = itertools.count()
 
@@ -50,6 +52,7 @@ class ScriptedChatModel(BaseChatModel):
 
     script: list[AIMessage] = Field(default_factory=list)
     calls: list[list[BaseMessage]] = Field(default_factory=list)
+    delay: float = 0.0  # seconds each call takes (to test cancel/recovery mid-run)
 
     @property
     def _llm_type(self) -> str:
@@ -66,6 +69,17 @@ class ScriptedChatModel(BaseChatModel):
         if not self.script:
             raise AssertionError(f"LLM script exhausted after {len(self.calls) - 1} calls")
         return ChatResult(generations=[ChatGeneration(message=self.script.pop(0))])
+
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        return self._generate(messages, stop, **kwargs)
 
     def bind_tools(
         self, tools: Sequence[Any], *, tool_choice: str | None = None, **kwargs: Any
@@ -157,6 +171,17 @@ class FakeBrowser:
     async def close(self, session_id: str) -> None:
         self.sessions.discard(session_id)
         self.closed.append(session_id)
+
+    async def list_sessions(self) -> list[SessionInfo]:
+        return [
+            SessionInfo(id=sid, url=self.url, tabs=1, idle_s=0.0, busy=False)
+            for sid in sorted(self.sessions)
+        ]
+
+    async def screencast(self, session_id: str) -> AsyncIterator[bytes]:
+        self._require(session_id)
+        for i in range(3):
+            yield JPEG_MAGIC + bytes([i])
 
 
 class StepClock:

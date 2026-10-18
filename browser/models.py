@@ -87,6 +87,14 @@ class ActionResult(BaseModel):
     url: str = ""
 
 
+class SessionInfo(BaseModel):
+    id: str
+    url: str
+    tabs: int
+    idle_s: float
+    busy: bool
+
+
 def short_url(url: str, base: str | None = None, limit: int = 80) -> str:
     if url.startswith("javascript:"):
         return "javascript:"

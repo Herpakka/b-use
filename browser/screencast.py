@@ -40,7 +40,11 @@ async def screencast(
     )
     try:
         while True:
-            yield await frames.get()
+            try:
+                yield await asyncio.wait_for(frames.get(), timeout=1.0)
+            except TimeoutError:
+                if page.is_closed():  # an idle, closed tab never sends another frame
+                    return
     finally:
         with contextlib.suppress(PlaywrightError):
             await cdp.send("Page.stopScreencast")

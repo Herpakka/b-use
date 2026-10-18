@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import time
+from collections.abc import AsyncGenerator
 
 from playwright.async_api import BrowserContext, Dialog, Page
 from playwright.async_api import Error as PlaywrightError
@@ -13,8 +14,8 @@ from browser.actions import AnyAction
 from browser.dom import ElementRef, build_observation
 from browser.executor import execute_action
 from browser.guards import NetworkPolicy
-from browser.models import ActionResult, Observation, clip_message, short_url
-from browser.screencast import take_screenshot
+from browser.models import ActionResult, Observation, SessionInfo, clip_message, short_url
+from browser.screencast import screencast, take_screenshot
 from core.config import Settings
 
 
@@ -123,3 +124,31 @@ class BrowserSession:
         async with self.lock:
             self.touch()
             return await take_screenshot(await self.current_page())
+
+    def info(self) -> SessionInfo:
+        page = self._page
+        return SessionInfo(
+            id=self.id,
+            url=page.url if page is not None and not page.is_closed() else "",
+            tabs=len(self.context.pages),
+            idle_s=round(time.monotonic() - self.last_used, 1),
+            busy=self.lock.locked(),
+        )
+
+    async def frames(self) -> AsyncGenerator[bytes, None]:
+        """Live JPEG frames of whichever tab is active; follows the agent into new tabs.
+
+        Needs no lock: the screencast is a separate CDP channel and never touches the DOM.
+        """
+        while not self.closed:
+            page = await self.current_page()
+            stream = screencast(page)
+            try:
+                async for frame in stream:
+                    yield frame
+                    if self._page is not page:
+                        break
+                else:
+                    return  # page closed and the stream ended
+            finally:
+                await stream.aclose()

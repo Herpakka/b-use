@@ -5,24 +5,38 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from api.routes import health
-from core.config import get_settings
+from api.deps import validate_api_keys
+from api.routes import debug, health, runs, sessions
+from api.services import ServicesFactory, build_services
+from core.config import Settings, get_settings
 from core.logging import configure_logging, get_logger
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    settings = get_settings()
-    configure_logging(settings.log_level, json=settings.log_json)
-    get_logger("api").info("startup", env=settings.env)
-    # Phase 3: start BrowserPool + reaper here and stop them on shutdown.
-    yield
-    get_logger("api").info("shutdown")
+def create_app(
+    settings: Settings | None = None, services_factory: ServicesFactory = build_services
+) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        s = settings or get_settings()
+        configure_logging(s.log_level, json=s.log_json)
+        validate_api_keys(s)
+        log = get_logger("api")
+        async with services_factory(s) as services:
+            app.state.services = services
+            log.info("startup", env=s.env, tenants=len(set(s.api_keys.values())))
+            yield
+        log.info("shutdown")
 
-
-def create_app() -> FastAPI:
-    app = FastAPI(title="Browser Use Agent", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(
+        title="Browser Use Agent",
+        version="0.2.0",
+        description="Natural-language tasks executed by an LLM driving a real Chromium.",
+        lifespan=lifespan,
+    )
     app.include_router(health.router)
+    app.include_router(runs.router)
+    app.include_router(sessions.router)
+    app.include_router(debug.router)
     return app
 
 

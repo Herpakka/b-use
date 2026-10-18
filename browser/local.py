@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
 from browser.actions import AnyAction
-from browser.models import ActionResult, Observation
+from browser.models import ActionResult, Observation, SessionInfo
 from browser.pool import BrowserPool
 from browser.service import SessionNotFoundError
 from browser.session import BrowserSession
@@ -44,6 +44,13 @@ class LocalBrowserService:
 
     async def close(self, session_id: str) -> None:
         await self.pool.close_session(session_id)
+
+    async def list_sessions(self) -> list[SessionInfo]:
+        return [s.info() for s in self.pool.sessions()]
+
+    async def screencast(self, session_id: str) -> AsyncIterator[bytes]:
+        async for frame in self._get(session_id).frames():
+            yield frame
 
 
 @asynccontextmanager

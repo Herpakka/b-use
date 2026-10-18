@@ -6,6 +6,7 @@ event sink and a resume endpoint instead of ``on_human``.
 
 from __future__ import annotations
 
+import inspect
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -21,7 +22,7 @@ from agent.prompts import prompt_version
 from agent.state import AgentState, Limits, new_state
 from core.config import Settings
 
-EventSink = Callable[[str, dict[str, Any]], None]
+EventSink = Callable[[str, dict[str, Any]], Awaitable[None] | None]
 HumanHandler = Callable[[dict[str, Any]], Awaitable[Any]]
 
 
@@ -110,7 +111,9 @@ async def drive(
         ):
             for node, update in chunk.items():
                 if node != "__interrupt__" and on_event is not None:
-                    on_event(node, update or {})
+                    result = on_event(node, update or {})
+                    if inspect.isawaitable(result):
+                        await result
         snapshot = await graph.aget_state(config)
         if snapshot.interrupts:
             value = snapshot.interrupts[0].value
