@@ -210,7 +210,11 @@ class RunManager:
         if self.draining:
             raise RunError(503, "this server is shutting down; retry")
         if self.ctx is None:
-            raise RunError(503, "the OpenAI key is not configured (BU_OPENAI_API_KEY)")
+            raise RunError(
+                503,
+                f"the {self.settings.llm_provider} key is not configured"
+                f" ({self.settings.llm_key_name})",
+            )
         if req.budget_usd is not None and req.budget_usd > self.settings.max_budget_usd:
             raise RunError(422, f"budget_usd may not exceed {self.settings.max_budget_usd}")
         await self._check_secrets(tenant, req.task)

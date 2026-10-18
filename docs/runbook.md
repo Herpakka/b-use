@@ -95,7 +95,7 @@ docker stats --no-stream $(stg ps -q app)
 ## 3. Cost spike
 
 **You see:** "LLM spend per hour" or `bu_run_cost_usd` p95 jumping; a tenant reports 402
-`monthly budget exhausted`; the OpenAI bill.
+`monthly budget exhausted`; the provider's bill.
 
 **Confirm — who and what:**
 
@@ -186,7 +186,7 @@ forwarding with real runs, a few cents).
 
 | Symptom | Meaning | Do |
 |---|---|---|
-| `readyz` → `llm: BU_OPENAI_API_KEY is not set` | runs are refused with 503 | set the key, restart |
+| `readyz` → `llm: BU_<PROVIDER>_API_KEY is not set` | runs are refused with 503 | set the key of `BU_LLM_PROVIDER`, restart |
 | Step lines "navigation blocked: … not in the allowed domains" | working as intended | the client must add the domain to `allowed_domains` |
 | "… refused by the egress proxy (internal address)" | the site resolves to a private address, or the remote browser's proxy (`devtools.browser_host`) is not running | check DNS / start browser_host |
 | `TypeText → refused: no secret named 'x'` / 422 `unknown secret` | the task uses `{{SECRET:x}}` that isn't stored for that tenant | `PUT /v1/secrets/x` |

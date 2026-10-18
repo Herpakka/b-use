@@ -53,8 +53,12 @@ def agent_context(
     secrets: SecretStore | None = None,
     tracer: Tracer | None = None,
 ) -> AgentContext | None:
-    if settings.openai_api_key is None:
-        log.warning("openai_key_missing", hint="runs are refused until BU_OPENAI_API_KEY is set")
+    if settings.llm_api_key is None:
+        log.warning(
+            "llm_key_missing",
+            provider=settings.llm_provider,
+            hint=f"runs are refused until {settings.llm_key_name} is set",
+        )
         return None
     prices = PriceTable.from_settings(settings)
     prices.require(settings.model_decide, settings.model_small)

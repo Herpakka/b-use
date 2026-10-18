@@ -53,7 +53,9 @@ async def readyz(request: Request) -> JSONResponse:
         "database": await _check(services.store.ping),
         "bus": await _check(services.bus.ping),
         "browser": browser.model_dump(),
-        "llm": "ok" if services.manager.ctx is not None else "BU_OPENAI_API_KEY is not set",
+        "llm": "ok"
+        if services.manager.ctx is not None
+        else f"{services.settings.llm_key_name} is not set",
     }
     checks["draining"] = services.manager.draining
     checks["replica"] = services.manager.replica

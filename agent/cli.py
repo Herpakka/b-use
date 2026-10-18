@@ -183,8 +183,8 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(
         "DEBUG" if args.verbose else "WARNING", json=False, redact=settings.redact_pii
     )
-    if settings.openai_api_key is None:
-        print("BU_OPENAI_API_KEY is not set (put it in .env)", file=sys.stderr)
+    if settings.llm_api_key is None:
+        print(f"{settings.llm_key_name} is not set (put it in .env)", file=sys.stderr)
         return 2
     try:
         return asyncio.run(_main(args, settings))

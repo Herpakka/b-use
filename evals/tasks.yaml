@@ -1,4 +1,4 @@
-# Nightly suite (phase 5.1): the 15 smoke tasks plus 15 more. Expected answers were checked
+# Full suite (phase 5.1, started by hand in GitHub Actions): the 15 smoke tasks plus 15 more. Expected answers were checked
 # against the live sites on 2026-10-18. Same fields as smoke.yaml, plus:
 #   secrets: {name: {value, domains}} — available to the task as {{SECRET:name}}
 # Targets (plan §5): success ≥ 70 % (v1; MVP ≥ 55 %), cost ≤ $0.15 per task, median ≤ 9 steps.

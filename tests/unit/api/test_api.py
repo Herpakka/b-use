@@ -89,12 +89,14 @@ def test_create_run_validation(body: dict[str, Any]) -> None:
         assert client.post("/v1/runs", json=body, headers=AUTH_A).status_code == 422
 
 
-def test_without_openai_key_runs_are_refused() -> None:
-    with client_for(happy_factory(with_llm=False)) as client:
+@pytest.mark.parametrize("provider", ["openai", "anthropic", "openrouter"])
+def test_without_the_providers_key_runs_are_refused(provider: str) -> None:
+    with client_for(happy_factory(with_llm=False), llm_provider=provider) as client:
         res = client.post(
             "/v1/runs", json={"task": "t", "allowed_domains": ["a.test"]}, headers=AUTH_A
         )
-        assert res.status_code == 503 and "OpenAI" in res.text
+        assert res.status_code == 503
+        assert f"BU_{provider.upper()}_API_KEY" in res.text and provider in res.text
 
 
 # ---------------------------------------------------------------- run lifecycle

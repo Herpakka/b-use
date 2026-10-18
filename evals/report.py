@@ -45,7 +45,8 @@ def render(current: dict[str, Any], previous: dict[str, Any] | None = None) -> s
     lines = [
         f"## Eval `{Path(current['suite']).name}` — {s['passed']}/{s['total']} passed {verdict}",
         "",
-        f"Models `{current['models']['decide']}` / `{current['models']['small']}` ·"
+        f"Provider `{current.get('provider', 'openai')}` · models `{current['models']['decide']}`"
+        f" / `{current['models']['small']}` ·"
         f" prompts `{current['prompt_version']}` · {current['created_at']}",
         "",
         "| | now | target |",
@@ -70,6 +71,15 @@ def render(current: dict[str, Any], previous: dict[str, Any] | None = None) -> s
         f"| total cost | ${s['total_cost_usd']:.4f} | |",
         "",
     ]
+    if previous and (
+        (previous.get("provider", "openai"), previous["models"])
+        != (current.get("provider", "openai"), current["models"])
+    ):
+        lines += [
+            f"> ⚠ The previous report used `{previous.get('provider', 'openai')}` /"
+            f" `{previous['models']['decide']}`: the deltas below compare different models.",
+            "",
+        ]
     regressions = [
         r for r in current["results"] if not r["passed"] and before.get(r["id"], {}).get("passed")
     ]

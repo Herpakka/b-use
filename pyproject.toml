@@ -24,6 +24,7 @@ dependencies = [
     "psutil>=7.2",
     "langfuse>=3",
     "prometheus-client>=0.21",
+    "langchain-anthropic>=1",
 ]
 
 [project.scripts]

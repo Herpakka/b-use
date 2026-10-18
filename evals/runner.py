@@ -241,8 +241,8 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = get_settings()
     configure_logging("WARNING", json=False, redact=settings.redact_pii)
-    if settings.openai_api_key is None:
-        print("BU_OPENAI_API_KEY is not set (put it in .env)", file=sys.stderr)
+    if settings.llm_api_key is None:
+        print(f"{settings.llm_key_name} is not set (put it in .env)", file=sys.stderr)
         return 2
     tasks = [t for t in load_suite(args.suite) if not args.only or t.id in args.only]
 
@@ -268,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "suite": str(args.suite),
                 "created_at": stamp,
+                "provider": settings.llm_provider,
                 "models": {"decide": settings.model_decide, "small": settings.model_small},
                 "prompt_version": prompt_version(),
                 "summary": summary,

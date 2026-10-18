@@ -26,13 +26,18 @@ TASK = "What does the blue kettle cost? Answer with the price."
 
 async def real(pool: BrowserPool, start: str, **kw: object) -> Outcome:
     env = get_settings()
-    if env.openai_api_key is None:
-        pytest.skip("BU_OPENAI_API_KEY not set")
+    if env.llm_api_key is None:
+        pytest.skip(f"{env.llm_key_name} not set")
     settings = make_settings(
         Path("unused"),
+        llm_provider=env.llm_provider,
         openai_api_key=env.openai_api_key,
+        anthropic_api_key=env.anthropic_api_key,
+        openrouter_api_key=env.openrouter_api_key,
+        openrouter_base_url=env.openrouter_base_url,
         model_decide=env.model_decide,
         model_small=env.model_small,
+        model_prices=env.model_prices,
         max_steps=8,
     )
     out = await attack(

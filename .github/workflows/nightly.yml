@@ -1,15 +1,33 @@
 name: nightly-eval
 
-# 5.1: the 30-task suite against live sites with the real model, every night (02:00 Bangkok),
-# compared with the previous night's report. Needs the repository secret OPENAI_API_KEY.
+# 5.1: the 30-task suite against live sites with a real model, started by hand (Actions →
+# nightly-eval → Run workflow), compared with the previous report. Pick the provider; its
+# repository secret must exist: OPENAI_API_KEY, ANTHROPIC_API_KEY or OPENROUTER_API_KEY.
+# (To run it on a timer again, add a `schedule:` trigger with a cron expression.)
 on:
-  schedule:
-    - cron: "0 19 * * *"
   workflow_dispatch:
     inputs:
-      only:
-        description: "Run only these task ids (space separated); empty = all"
+      provider:
+        description: "LLM provider"
+        type: choice
+        options: [openai, anthropic, openrouter]
+        default: openai
+      model_decide:
+        description: "Decision model (empty = the provider's default: gpt-4.1 / claude-sonnet-4-5 / openai/gpt-4.1)"
         required: false
+      model_small:
+        description: "Small model for Extract (empty = default: gpt-4.1-mini / claude-haiku-4-5 / openai/gpt-4.1-mini)"
+        required: false
+      model_prices:
+        description: 'USD per 1M tokens for models not in the built-in table, JSON: {"model": [input, output]}'
+        required: false
+      only:
+        description: "Run only these task ids (space separated); empty = all 30"
+        required: false
+      adversarial:
+        description: "Also run the adversarial suite against the real model"
+        type: boolean
+        default: true
 
 concurrency:
   group: nightly-eval
@@ -24,10 +42,34 @@ jobs:
       options: --shm-size=2g
     env:
       UV_PYTHON_DOWNLOADS: never
+      BU_LLM_PROVIDER: ${{ inputs.provider }}
       BU_OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      BU_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      BU_OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       BU_SESSIONS_DIR: /tmp/bu-sessions
       BU_EVENT_BUS: local
+      INPUT_MODEL_DECIDE: ${{ inputs.model_decide }}
+      INPUT_MODEL_SMALL: ${{ inputs.model_small }}
+      INPUT_MODEL_PRICES: ${{ inputs.model_prices }}
+      INPUT_ONLY: ${{ inputs.only }}
     steps:
+      - name: provider and key
+        run: |
+          # An empty input must mean "use the default", so set these only when given.
+          [ -n "$INPUT_MODEL_DECIDE" ] && echo "BU_MODEL_DECIDE=$INPUT_MODEL_DECIDE" >> "$GITHUB_ENV"
+          [ -n "$INPUT_MODEL_SMALL" ] && echo "BU_MODEL_SMALL=$INPUT_MODEL_SMALL" >> "$GITHUB_ENV"
+          [ -n "$INPUT_MODEL_PRICES" ] && echo "BU_MODEL_PRICES=$INPUT_MODEL_PRICES" >> "$GITHUB_ENV"
+          case "$BU_LLM_PROVIDER" in
+            openai) key="$BU_OPENAI_API_KEY"; name=OPENAI_API_KEY ;;
+            anthropic) key="$BU_ANTHROPIC_API_KEY"; name=ANTHROPIC_API_KEY ;;
+            openrouter) key="$BU_OPENROUTER_API_KEY"; name=OPENROUTER_API_KEY ;;
+            *) echo "unknown provider '$BU_LLM_PROVIDER'"; exit 1 ;;
+          esac
+          if [ -z "$key" ]; then
+            echo "::error::provider $BU_LLM_PROVIDER needs the repository secret $name (Settings → Secrets and variables → Actions)"
+            exit 1
+          fi
+          echo "provider: $BU_LLM_PROVIDER" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
@@ -42,13 +84,13 @@ jobs:
       - name: 30-task eval (≥ 70 % to pass)
         run: |
           only=""
-          for id in ${{ github.event.inputs.only }}; do only="$only --only $id"; done
+          for id in $INPUT_ONLY; do only="$only --only $id"; done
           uv run python -m evals.runner evals/tasks.yaml --min-rate 0.7 \
             --summary-md "$GITHUB_STEP_SUMMARY" $only
       - name: adversarial suite against the real model
-        if: always()
+        if: always() && inputs.adversarial
         run: uv run pytest tests/adversarial -m llm -q
-      - name: keep reports for tomorrow's comparison
+      - name: keep reports for the next comparison
         if: always()
         uses: actions/cache/save@v4
         with:

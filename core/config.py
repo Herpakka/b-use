@@ -4,15 +4,35 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, Field, SecretStr, field_validator
+from pydantic import AliasChoices, BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class StaticSecret(BaseModel):
     value: SecretStr
     domains: list[str] = Field(default_factory=list)
+
+
+# (decide model, small model) used when BU_MODEL_DECIDE / BU_MODEL_SMALL are not set.
+PROVIDER_MODELS: dict[str, tuple[str, str]] = {
+    "openai": ("gpt-4.1", "gpt-4.1-mini"),
+    "anthropic": ("claude-sonnet-4-5", "claude-haiku-4-5"),
+    "openrouter": ("openai/gpt-4.1", "openai/gpt-4.1-mini"),
+}
+
+
+def _model_mismatch(provider: str, model: str) -> str | None:
+    """Catch the classic slip: switching BU_LLM_PROVIDER but leaving the old model names."""
+    name = model.lower()
+    if provider == "openai" and (name.startswith("claude") or "/" in name):
+        return "is not an OpenAI model name"
+    if provider == "anthropic" and (name.startswith(("gpt-", "o1", "o3", "o4")) or "/" in name):
+        return "is not an Anthropic model name"
+    if provider == "openrouter" and "/" not in name:
+        return 'is not an OpenRouter model name (use "vendor/model", e.g. openai/gpt-4.1)'
+    return None
 
 
 class Settings(BaseSettings):
@@ -27,10 +47,20 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_json: bool = True
 
-    # --- LLM
+    # --- LLM: which provider serves the models, and the key for it (only that one is needed).
+    # The model names default per provider (PROVIDER_MODELS) unless set explicitly; names
+    # follow the provider: "gpt-4.1", "claude-sonnet-4-5", or OpenRouter's "vendor/model".
+    llm_provider: Literal["openai", "anthropic", "openrouter"] = "openai"
     openai_api_key: SecretStr | None = Field(
         default=None, validation_alias=AliasChoices("BU_OPENAI_API_KEY", "OPENAI_API_KEY")
     )
+    anthropic_api_key: SecretStr | None = Field(
+        default=None, validation_alias=AliasChoices("BU_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY")
+    )
+    openrouter_api_key: SecretStr | None = Field(
+        default=None, validation_alias=AliasChoices("BU_OPENROUTER_API_KEY", "OPENROUTER_API_KEY")
+    )
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
     model_decide: str = "gpt-4.1"
     model_small: str = "gpt-4.1-mini"
     # USD per 1M tokens as (input, output); merged over the defaults in core/costs.py.
@@ -147,6 +177,9 @@ class Settings(BaseSettings):
         "secrets_key",
         "langfuse_public_key",
         "langfuse_secret_key",
+        "openai_api_key",
+        "anthropic_api_key",
+        "openrouter_api_key",
         mode="before",
     )
     @classmethod
@@ -154,6 +187,49 @@ class Settings(BaseSettings):
         # `BU_BROWSER_WS_ENDPOINT=` must mean "no remote browser" — an empty string would
         # otherwise select remote mode and leave the browser without its local egress proxy.
         return None if isinstance(v, str) and not v.strip() else v
+
+    @model_validator(mode="before")
+    @classmethod
+    def _blank_models_are_unset(cls, data: Any) -> Any:
+        # `BU_MODEL_DECIDE=` in .env (or an empty CI input) means "the provider's default".
+        if isinstance(data, dict):
+            return {
+                k: v
+                for k, v in data.items()
+                if not (
+                    k in ("model_decide", "model_small") and isinstance(v, str) and not v.strip()
+                )
+            }
+        return data
+
+    @model_validator(mode="after")
+    def _provider_model_defaults(self) -> Settings:
+        decide, small = PROVIDER_MODELS[self.llm_provider]
+        if "model_decide" not in self.model_fields_set:
+            self.model_decide = decide
+        if "model_small" not in self.model_fields_set:
+            self.model_small = small
+        for env_name, model in (
+            ("BU_MODEL_DECIDE", self.model_decide),
+            ("BU_MODEL_SMALL", self.model_small),
+        ):
+            if problem := _model_mismatch(self.llm_provider, model):
+                raise ValueError(f"{env_name}={model!r} {problem}; unset it to use the default")
+        return self
+
+    @property
+    def llm_api_key(self) -> SecretStr | None:
+        """The key of the selected provider."""
+        return {
+            "openai": self.openai_api_key,
+            "anthropic": self.anthropic_api_key,
+            "openrouter": self.openrouter_api_key,
+        }[self.llm_provider]
+
+    @property
+    def llm_key_name(self) -> str:
+        """Environment variable that must hold the selected provider's key."""
+        return f"BU_{self.llm_provider.upper()}_API_KEY"
 
 
 @lru_cache

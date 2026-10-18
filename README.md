@@ -1,6 +1,6 @@
 # Browser Use Agent
 
-Natural-language task → an LLM (OpenAI, orchestrated with LangGraph) drives a real Chromium
+Natural-language task → an LLM (OpenAI, Anthropic or OpenRouter, orchestrated with LangGraph) drives a real Chromium
 (Playwright) until the task is done, pausing for a human on logins, captchas and irreversible
 actions.
 
@@ -30,9 +30,9 @@ Playwright on Windows needs the Proactor event loop while async psycopg needs th
 so the app, tests and CLI run in the Linux container.
 
 ```bash
-cp .env.example .env                 # set BU_OPENAI_API_KEY, BU_API_KEYS (and BU_SECRETS_KEY)
+cp .env.example .env                 # set BU_LLM_PROVIDER + its key, BU_API_KEYS (and BU_SECRETS_KEY)
 docker compose up -d --build         # app + postgres + redis
-curl localhost:8000/readyz           # 200 once database, bus, browser and OpenAI key are OK
+curl localhost:8000/readyz           # 200 once database, bus, browser and LLM key are OK
 ```
 
 `/healthz` is liveness (the process answers); `/readyz` is readiness (it can serve runs) and
@@ -139,6 +139,18 @@ Extract text. Values are encrypted at rest with `BU_SECRETS_KEY` (AES-GCM, bound
 name). The CLI and evals read `BU_LOCAL_SECRETS` instead. Not covered: a value the page
 transforms before showing it (upper-cased, reformatted), and screenshots of non-password fields.
 
+## LLM provider
+
+`BU_LLM_PROVIDER` selects `openai` (default), `anthropic` or `openrouter` (an OpenAI-compatible
+gateway to many vendors; model names are `vendor/model`). Set only that provider's key; the
+decision and Extract models default per provider (see `.env.example`) or come from
+`BU_MODEL_DECIDE` / `BU_MODEL_SMALL`. Prices for the budget guards are built in for the GPT-4.1
+family and a few Claude models; anything else needs `BU_MODEL_PRICES`, and the app refuses to
+start without a price rather than run with an uncounted budget. OpenRouter bills at its own
+rates, so treat the counted cost as an estimate there. The prompts were tuned and the 28/30 eval
+result measured on `gpt-4.1`; other models are supported, not yet evaluated — run the eval
+workflow with the new provider before relying on it.
+
 ## Costs
 
 Every run has a USD budget (`BU_BUDGET_USD`, or `budget_usd` up to `BU_MAX_BUDGET_USD`) and
@@ -165,7 +177,7 @@ question as they are, because the client asked for them. Kept for: screenshots 2
 (`BU_SCREENSHOT_TTL_S`), agent checkpoints (page snapshots) 24 h after the run ends
 (`BU_CHECKPOINT_TTL_S`), whole runs with their events `BU_RUN_RETENTION_DAYS` (off by default).
 A run's own browser session is deleted with its cookies when it ends; named sessions keep
-theirs. Page content still goes to OpenAI — that is how the agent works.
+theirs. Page content still goes to the LLM provider you chose — that is how the agent works.
 
 ## CLI, tests, evals
 
@@ -193,8 +205,9 @@ same pages against the real model (~5 cents):
 docker compose run --rm app uv run pytest tests/adversarial -m "not llm"
 ```
 
-Evals — `evals/smoke.yaml` (15 tasks) and `evals/tasks.yaml` (those plus 15 more: 30, run
-nightly by `.github/workflows/nightly.yml`). Each run writes a JSON report and can append a
+Evals — `evals/smoke.yaml` (15 tasks) and `evals/tasks.yaml` (those plus 15 more: 30, started
+by hand from GitHub: Actions → nightly-eval → Run workflow, where you pick the provider and
+optionally the models). Each run writes a JSON report and can append a
 Markdown comparison with the previous one (`--summary-md`, also `python -m evals.report`):
 
 ```bash

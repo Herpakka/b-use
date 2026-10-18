@@ -81,3 +81,13 @@ def test_previous_report_is_the_latest_earlier_one(tmp_path: Path) -> None:
         tmp_path / "tasks-20261018T000000Z.json"
     )
     assert previous_report(tmp_path / "tasks-20261017T000000Z.json") is None
+
+
+def test_report_warns_when_the_model_changed() -> None:
+    before = report({"a": True})
+    now = report({"a": True})
+    now["provider"] = "anthropic"
+    now["models"] = {"decide": "claude-sonnet-4-5", "small": "claude-haiku-4-5"}
+    md = render(now, before)
+    assert "Provider `anthropic`" in md and "compare different models" in md
+    assert "compare different models" not in render(before, report({"a": True}))

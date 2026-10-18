@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_openai import ChatOpenAI
@@ -26,15 +27,36 @@ class ToolCall:
     tokens_out: int
 
 
+# A decision is one tool call; this only bounds a runaway reply (Anthropic requires a limit).
+MAX_OUTPUT_TOKENS = 4096
+
+
 def make_chat_model(settings: Settings, model: str) -> BaseChatModel:
-    if settings.openai_api_key is None:
-        raise RuntimeError("BU_OPENAI_API_KEY (or OPENAI_API_KEY) is not set")
+    """The chat model for ``settings.llm_provider``: OpenAI, Anthropic, or OpenRouter (an
+    OpenAI-compatible API in front of many vendors' models)."""
+    key = settings.llm_api_key
+    if key is None:
+        raise RuntimeError(f"{settings.llm_key_name} is not set")
+    if settings.llm_provider == "anthropic":
+        return ChatAnthropic(  # type: ignore[call-arg]
+            model_name=model,
+            api_key=key,
+            timeout=settings.llm_timeout_s,
+            max_retries=2,
+            max_tokens_to_sample=MAX_OUTPUT_TOKENS,
+        )
     return ChatOpenAI(
         model=model,
-        api_key=settings.openai_api_key,
+        api_key=key,
+        base_url=settings.openrouter_base_url if settings.llm_provider == "openrouter" else None,
         timeout=settings.llm_timeout_s,
         max_retries=2,
     )
+
+
+def forced_tool_choice(llm: BaseChatModel) -> str:
+    """Spelling of "the model must call a tool" — differs between the APIs."""
+    return "any" if getattr(llm, "_llm_type", "") == "anthropic-chat" else "required"
 
 
 def _usage(message: BaseMessage) -> tuple[int, int]:
@@ -55,7 +77,9 @@ async def call_tool(
     llm: BaseChatModel, messages: Sequence[BaseMessage], tools: Sequence[dict[str, Any]]
 ) -> ToolCall:
     """Invoke ``llm`` forcing exactly one tool call; return it with its token usage."""
-    bound = llm.bind_tools(list(tools), tool_choice="required", parallel_tool_calls=False)
+    bound = llm.bind_tools(
+        list(tools), tool_choice=forced_tool_choice(llm), parallel_tool_calls=False
+    )
     message = await bound.ainvoke(list(messages))
     tokens_in, tokens_out = _usage(message)
     calls = message.tool_calls if isinstance(message, AIMessage) else []
