@@ -1,0 +1,125 @@
+[project]
+name = "browser-use-agent"
+version = "0.1.0"
+description = "Natural-language tasks executed by an LLM driving a real Chromium browser."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.143",
+    "uvicorn[standard]>=0.54",
+    "pydantic>=2.14",
+    "pydantic-settings>=2.16",
+    "structlog>=26.1",
+    # Pinned: must match the mcr.microsoft.com/playwright/python image tag in docker/Dockerfile.
+    "playwright==1.63.0",
+    "langgraph>=1.2.16",
+    "langchain-core>=1.6",
+    "langchain-openai>=1.7",
+    "langgraph-checkpoint-postgres>=3.2",
+    "psycopg[binary,pool]>=3.3",
+    "redis>=8.1",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+bu = "agent.cli:main"
+lint = "devtools.lint:main"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17",
+    "mypy>=2.4",
+    "pytest>=9.1",
+    "pytest-asyncio>=1.4",
+    "import-linter>=2.15",
+    "httpx>=0.28",
+    "psutil>=7.2",
+    "types-psutil",
+    "types-PyYAML",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["api", "agent", "browser", "core", "devtools", "evals"]
+
+# ---------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["evals/reports"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "ASYNC", "RUF", "N"]
+# Thai text in prompts/keywords trips the ambiguous-unicode checks.
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+# Embedded JavaScript.
+"browser/dom.py" = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["api", "agent", "browser", "core", "devtools", "evals"]
+
+# ---------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["api", "agent", "browser", "core", "devtools", "evals", "tests"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+# ---------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+addopts = "-ra --strict-markers"
+markers = [
+    "browser: needs a Chromium install (run inside the dev container)",
+    "live: hits real websites",
+    "llm: calls the real OpenAI API",
+    "pg: needs a reachable Postgres (BU_DATABASE_URL)",
+]
+
+# ---------------------------------------------------------------- layer rules
+# Enforces the dependency table from the architecture plan (section 2).
+[tool.importlinter]
+root_packages = ["api", "agent", "browser", "core"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "core is the bottom layer"
+type = "forbidden"
+source_modules = ["core"]
+forbidden_modules = [
+    "api", "agent", "browser",
+    "playwright", "fastapi", "langgraph", "langchain_core", "langchain_openai", "openai",
+]
+
+[[tool.importlinter.contracts]]
+name = "browser knows Playwright and DOM, never prompts, LLMs or HTTP"
+type = "forbidden"
+source_modules = ["browser"]
+forbidden_modules = ["api", "agent", "fastapi", "langgraph", "langchain_core", "langchain_openai", "openai"]
+
+[[tool.importlinter.contracts]]
+name = "agent never touches Playwright/CDP or FastAPI"
+type = "forbidden"
+source_modules = ["agent"]
+forbidden_modules = ["api", "playwright", "fastapi"]
+# The CLI is a composition root: it is the one place that wires the real browser pool in.
+ignore_imports = ["agent.cli -> browser.local"]
+
+[[tool.importlinter.contracts]]
+name = "api never touches Playwright"
+type = "forbidden"
+source_modules = ["api"]
+forbidden_modules = ["playwright"]

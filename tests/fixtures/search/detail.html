@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Product</title></head>
+<body>
+  <div id="product">Loading…</div>
+  <script>
+    const details = {
+      "kettle-blue": { name: "Blue Kettle", price: "฿1,290", stock: "In stock (12)" },
+      "kettle-red": { name: "Red Kettle", price: "฿1,350", stock: "Out of stock" },
+      "teapot-green": { name: "Green Teapot", price: "฿890", stock: "In stock (3)" },
+    };
+    const id = new URLSearchParams(location.search).get("id");
+    setTimeout(() => {
+      const d = details[id];
+      document.getElementById("product").innerHTML = d
+        ? `<h1>${d.name}</h1><p>Price: ${d.price}</p><p>${d.stock}</p><button>Add to cart</button><button>Place order</button>`
+        : "<h1>Not found</h1>";
+    }, 250);
+  </script>
+</body>
+</html>

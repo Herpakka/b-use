@@ -1,0 +1,58 @@
+name: browser-use
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: browser-use:dev
+    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    ports:
+      - "8000:8000"
+    # Chromium needs a big /dev/shm; without it tabs crash silently.
+    shm_size: "2gb"
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      BU_DATABASE_URL: postgresql://bu:bu@postgres:5432/bu
+      BU_REDIS_URL: redis://redis:6379/0
+      BU_SESSIONS_DIR: /data/sessions
+      # Bind mounts from Windows don't deliver inotify events.
+      WATCHFILES_FORCE_POLLING: "true"
+      # Keep the container's .pyc files out of the shared checkout.
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ..:/app
+      - sessions:/data/sessions
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: bu
+      POSTGRES_PASSWORD: bu
+      POSTGRES_DB: bu
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bu -d bu"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  sessions:
+  pgdata:

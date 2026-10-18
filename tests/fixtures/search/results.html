@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Results</title></head>
+<body>
+  <h1>Results</h1>
+  <ul id="results"></ul>
+  <script>
+    const products = [
+      { id: "kettle-blue", name: "Blue Kettle" },
+      { id: "kettle-red", name: "Red Kettle" },
+      { id: "teapot-green", name: "Green Teapot" },
+    ];
+    const q = (new URLSearchParams(location.search).get("q") || "").toLowerCase();
+    const ul = document.getElementById("results");
+    const hits = products.filter((p) => p.name.toLowerCase().includes(q));
+    ul.innerHTML = hits.length
+      ? hits.map((p) => `<li><a href="/search/detail.html?id=${p.id}">${p.name}</a></li>`).join("")
+      : "<li>No results</li>";
+  </script>
+</body>
+</html>

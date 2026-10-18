@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Infinite scroll fixture</title>
+  <style>.row { height: 60px; border-bottom: 1px solid #eee; }</style>
+</head>
+<body>
+  <h1>Feed</h1>
+  <div id="feed"></div>
+  <script>
+    const feed = document.getElementById("feed");
+    let n = 0;
+    function more(count) {
+      for (let i = 0; i < count && n < 100; i++) {
+        n++;
+        const row = document.createElement("div");
+        row.className = "row";
+        row.innerHTML = `<a href="#item-${n}">Item ${n}</a>`;
+        feed.appendChild(row);
+      }
+    }
+    more(20);
+    window.addEventListener("scroll", () => {
+      if (window.innerHeight + window.scrollY >= document.body.scrollHeight - 200) more(20);
+    });
+  </script>
+</body>
+</html>

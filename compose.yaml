@@ -1,0 +1,4 @@
+# Lets `docker compose ...` work from the repo root; the real definition is docker/compose.yml.
+name: browser-use
+include:
+  - docker/compose.yml

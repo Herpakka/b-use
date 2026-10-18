@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>SPA fixture</title></head>
+<body>
+  <div id="app">Loading…</div>
+  <script>
+    const app = document.getElementById("app");
+    function list() {
+      app.innerHTML = "<h2>Products</h2>" +
+        ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]
+          .map((n) => `<button data-name="${n}">Open ${n}</button>`).join("");
+      app.querySelectorAll("button").forEach((b) =>
+        b.addEventListener("click", () => {
+          history.pushState({}, "", "/spa.html/" + b.dataset.name.toLowerCase());
+          detail(b.dataset.name);
+        }));
+    }
+    function detail(name) {
+      app.innerHTML = "<h2>Loading detail…</h2>";
+      // Renders in two waves so a single quiet poll is not enough to call the DOM settled.
+      setTimeout(() => {
+        app.innerHTML = `<h2>${name} detail</h2><p>Stock: 7</p>`;
+        setTimeout(() => {
+          const back = document.createElement("button");
+          back.textContent = "Back to list";
+          back.addEventListener("click", () => { history.pushState({}, "", "/spa.html"); list(); });
+          app.appendChild(back);
+        }, 200);
+      }, 300);
+    }
+    setTimeout(list, 400);
+  </script>
+</body>
+</html>

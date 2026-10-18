@@ -1,0 +1,98 @@
+# Smoke suite for M2: 15 tasks on sites built for scraping practice plus stable reference pages.
+# Expected answers were checked against the live sites on 2026-10-18.
+#
+# expect: contains (all, case-insensitive) · any_of (at least one) · regex · url_contains
+# human:  approve | deny | <free-text answer>   — how the runner answers interrupts
+
+tasks:
+  - id: books-price
+    task: What is the price of the book "A Light in the Attic"?
+    allowed_domains: [books.toscrape.com]
+    start_url: https://books.toscrape.com/
+    expect: {contains: ["51.77"]}
+
+  - id: books-poetry-count
+    task: How many books are listed in the Poetry category?
+    allowed_domains: [books.toscrape.com]
+    start_url: https://books.toscrape.com/
+    expect: {regex: '\b19\b'}
+
+  - id: books-rating
+    task: What star rating does the book "Tipping the Velvet" have?
+    allowed_domains: [books.toscrape.com]
+    start_url: https://books.toscrape.com/
+    # "One" (or 1) and no other rating word; "five" is allowed as in "one out of five".
+    expect: {regex: '(?is)^(?!.*\b(two|three|four)\b).*\b(one|1)\b'}
+
+  - id: books-stock
+    task: How many copies of "Sharp Objects" are in stock?
+    allowed_domains: [books.toscrape.com]
+    start_url: https://books.toscrape.com/
+    expect: {regex: '\b20\b'}
+
+  - id: quotes-author
+    task: Who is the author of the quote that begins "The world as we have created it is a process of our thinking"?
+    allowed_domains: [quotes.toscrape.com]
+    start_url: https://quotes.toscrape.com/
+    expect: {contains: ["Einstein"]}
+
+  - id: quotes-born
+    task: According to the author page on quotes.toscrape.com, when was Albert Einstein born?
+    allowed_domains: [quotes.toscrape.com]
+    start_url: https://quotes.toscrape.com/
+    expect: {contains: ["March 14", "1879"]}
+
+  - id: quotes-page2
+    task: Go to the second page of quotes. Who wrote the first quote on that page?
+    allowed_domains: [quotes.toscrape.com]
+    start_url: https://quotes.toscrape.com/
+    expect: {contains: ["Marilyn Monroe"]}
+
+  - id: internet-login
+    task: >-
+      Log in on the-internet.herokuapp.com/login using the username "tomsmith" and the
+      password "SuperSecretPassword!" given here, then report the message shown after login.
+    allowed_domains: [the-internet.herokuapp.com]
+    start_url: https://the-internet.herokuapp.com/login
+    human: approve
+    expect: {contains: ["secure area"]}
+
+  - id: internet-dropdown
+    task: On the dropdown page, select "Option 2" and report which option is now selected.
+    allowed_domains: [the-internet.herokuapp.com]
+    start_url: https://the-internet.herokuapp.com/dropdown
+    expect: {contains: ["Option 2"]}
+
+  - id: internet-checkboxes
+    task: On the checkboxes page, make sure both checkboxes are checked, then report the state of each checkbox.
+    allowed_domains: [the-internet.herokuapp.com]
+    start_url: https://the-internet.herokuapp.com/checkboxes
+    expect: {regex: '(?is)(both|1.*2).*checked'}
+
+  - id: internet-dynamic
+    task: On the dynamic loading example 2 page, click Start and report the text that appears when loading finishes.
+    allowed_domains: [the-internet.herokuapp.com]
+    start_url: https://the-internet.herokuapp.com/dynamic_loading/2
+    expect: {contains: ["Hello World"]}
+
+  - id: wiki-python-year
+    task: According to English Wikipedia, in what year was the Python programming language first released?
+    allowed_domains: [en.wikipedia.org]
+    start_url: https://en.wikipedia.org/wiki/Main_Page
+    expect: {contains: ["1991"]}
+
+  - id: wiki-tungsten
+    task: What is the atomic number of tungsten according to its English Wikipedia article?
+    allowed_domains: [en.wikipedia.org]
+    expect: {regex: '\b74\b'}
+
+  - id: pydocs-deque
+    task: In the official Python 3 documentation, which standard-library module provides the deque class?
+    allowed_domains: [docs.python.org]
+    start_url: https://docs.python.org/3/
+    expect: {contains: ["collections"]}
+
+  - id: example-purpose
+    task: What does the page at example.com say the domain is for?
+    allowed_domains: [example.com]
+    expect: {any_of: ["documentation", "illustrative", "examples"]}

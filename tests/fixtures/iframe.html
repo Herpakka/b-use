@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Iframe fixture</title></head>
+<body>
+  <h1>Parent page</h1>
+  <button id="parent-btn">Parent button</button>
+  <!-- cross-origin: served from other.test -->
+  <iframe src="https://other.test/iframe_child.html" width="400" height="200" title="child"></iframe>
+  <!-- off-screen frames are skipped -->
+  <iframe src="https://fixtures.test/iframe_child.html" style="position:absolute; top:5000px" width="400" height="200"></iframe>
+  <iframe src="https://fixtures.test/iframe_child.html" style="display:none"></iframe>
+</body>
+</html>

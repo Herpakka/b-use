@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Shadow DOM fixture</title></head>
+<body>
+  <h1>Shadow DOM</h1>
+  <x-card>
+    <a href="/static.html" slot="footer">Slotted link</a>
+  </x-card>
+  <p id="status">untouched</p>
+  <script>
+    customElements.define("x-card", class extends HTMLElement {
+      constructor() {
+        super();
+        const root = this.attachShadow({ mode: "open" });
+        root.innerHTML = `
+          <style>:host { display: block; border: 1px solid #999; padding: 8px; }</style>
+          <p>Card text inside shadow root</p>
+          <button id="inner">Shadow button</button>
+          <input placeholder="Shadow input">
+          <footer><slot name="footer"></slot></footer>`;
+        root.getElementById("inner").addEventListener("click", () => {
+          document.getElementById("status").textContent = "shadow clicked";
+        });
+      }
+    });
+  </script>
+</body>
+</html>

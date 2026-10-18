@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Static fixture</title>
+  <style>
+    #far { position: absolute; top: 4000px; }
+    .card { cursor: pointer; padding: 8px; border: 1px solid #ccc; width: 200px; }
+    .card span { cursor: pointer; }
+    /* stands in for an icon font: glyphs with size but no text */
+    .icon-star { display: inline-block; width: 12px; height: 12px; background: gold; }
+  </style>
+</head>
+<body>
+  <header>
+    <nav>
+      <a href="/static.html#home">Home</a>
+      <a href="https://other.test/iframe_child.html">Other site</a>
+      <a href="https://blocked.test/page">Blocked site</a>
+      <a href="/popup_target.html" target="_blank">Open in new tab</a>
+    </nav>
+  </header>
+  <main>
+    <h1>Welcome to the fixture shop</h1>
+    <p>Prices include VAT. Free shipping over ฿1,000.</p>
+    <form id="f" onsubmit="event.preventDefault(); document.getElementById('status').textContent = 'submitted ' + document.getElementById('q').value;">
+      <label for="q">Search products</label>
+      <input id="q" name="q" type="text" placeholder="Type a product">
+      <label for="pw">Password</label>
+      <input id="pw" type="password">
+      <select id="size" aria-label="Size">
+        <option>Small</option>
+        <option>Medium</option>
+        <option>Large</option>
+      </select>
+      <label><input id="agree" type="checkbox"> I agree</label>
+      <button type="submit">Search</button>
+    </form>
+    <p id="status">idle</p>
+    <img src="/kettle.png" alt="Blue kettle photo" width="120" height="80">
+    <p class="star-rating Four"><i class="icon-star"></i><i class="icon-star"></i></p>
+    <span role="img" aria-label="4.5 out of 5 stars" style="display:inline-block; width:60px; height:12px"></span>
+    <button aria-label="Close banner">×</button>
+    <button style="display:none">Hidden button</button>
+    <div style="visibility:hidden"><button>Invisible button</button></div>
+    <div class="card" id="card"><span>Fancy card</span></div>
+    <button id="alert" onclick="alert('hello from fixture'); document.getElementById('status').textContent = 'alerted';">Show alert</button>
+    <input type="hidden" name="csrf" value="x">
+    <div id="far"><button>Far below</button></div>
+  </main>
+  <script>
+    document.getElementById("card").addEventListener("click", () => {
+      document.getElementById("status").textContent = "card clicked";
+    });
+  </script>
+</body>
+</html>
