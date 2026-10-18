@@ -94,6 +94,7 @@ class SessionOut(BaseModel):
     tabs: int
     idle_s: float
     busy: bool
+    held: bool = Field(default=False, description="Kept open because its run waits for a human.")
 
 
 def session_id(tenant: str, name: str) -> str:

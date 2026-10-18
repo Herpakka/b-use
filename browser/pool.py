@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 
 from playwright.async_api import Browser, Playwright, async_playwright
 
+from browser.egress import EgressProxy, ProxySettings, context_proxy
 from browser.guards import NetworkPolicy, install_routes, normalize_domains
 from browser.session import BrowserSession
 from core.config import Settings
@@ -40,14 +41,28 @@ def loopback_host_header(endpoint: str) -> dict[str, str]:
     return {"Host": f"localhost:{port}"} if port else {}
 
 
+REMOTE_EGRESS_URL = "http://127.0.0.1:3129"
+
+
+def endpoint_token(endpoint: str) -> str:
+    return urlsplit(endpoint).path.strip("/")
+
+
 def redact_endpoint(endpoint: str) -> str:
     parts = urlsplit(endpoint)
     return f"{parts.scheme}://{parts.netloc}/…"
 
 
 class BrowserPool:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, egress: EgressProxy | None = None) -> None:
         self.settings = settings
+        # A remote browser's traffic leaves from *its* machine, so its egress proxy runs there
+        # (devtools.browser_host); only a local browser gets one in this process.
+        if egress is None and settings.egress_proxy and settings.browser_ws_endpoint is None:
+            egress = EgressProxy(host=settings.egress_listen_host, port=settings.egress_listen_port)
+        self.egress = egress
+        if egress is not None and egress.on_blocked is None:
+            egress.on_blocked = self._on_egress_blocked
         self._pw: Playwright | None = None
         self._browser: Browser | None = None
         self._sessions: dict[str, BrowserSession] = {}
@@ -68,6 +83,8 @@ class BrowserPool:
         await self.stop()
 
     async def start(self) -> None:
+        if self.egress is not None:
+            await self.egress.start()
         self._pw = await async_playwright().start()
         try:
             await self._launch()
@@ -92,6 +109,8 @@ class BrowserPool:
         if self._pw is not None:
             await self._pw.stop()
         self._browser = self._pw = None
+        if self.egress is not None:
+            await self.egress.stop()
 
     async def _launch(self) -> Browser:
         assert self._pw is not None, "BrowserPool.start() was not called"
@@ -135,6 +154,21 @@ class BrowserPool:
 
     def sessions(self) -> list[BrowserSession]:
         return [s for s in self._sessions.values() if not s.closed]
+
+    def _on_egress_blocked(self, session_id: str | None, target: str, reason: str) -> None:
+        session = self._sessions.get(session_id) if session_id else None
+        if session is not None:
+            session.record_egress_block(target, reason)
+
+    def context_proxy(self, session_id: str) -> ProxySettings | None:
+        """Proxy settings for a new context; None only if the egress proxy is switched off."""
+        if self.egress is not None:
+            url = self.settings.egress_browser_url or f"http://127.0.0.1:{self.egress.port}"
+            return self.egress.context_proxy(session_id, url)
+        if self.settings.egress_proxy and (endpoint := self.settings.browser_ws_endpoint):
+            url = self.settings.egress_browser_url or REMOTE_EGRESS_URL
+            return context_proxy(session_id, url, endpoint_token(endpoint))
+        return None
 
     def storage_path(self, session_id: str) -> Path:
         return self.settings.sessions_dir / f"{session_id}.json"
@@ -186,6 +220,7 @@ class BrowserPool:
             # Service-worker requests bypass context.route, so the network guard needs them off.
             service_workers="block",
             accept_downloads=False,
+            proxy=self.context_proxy(session_id),  # type: ignore[arg-type]
         )
         policy = NetworkPolicy(
             allowed_domains=normalize_domains(allowed_domains),
@@ -228,10 +263,14 @@ class BrowserPool:
 
     async def reap_idle(self, now: float | None = None) -> list[str]:
         now = time.monotonic() if now is None else now
+
+        def limit(s: BrowserSession) -> float:
+            return self.settings.held_idle_timeout_s if s.held else self.settings.idle_timeout_s
+
         idle = [
             sid
             for sid, s in self._sessions.items()
-            if not s.lock.locked() and now - s.last_used > self.settings.idle_timeout_s
+            if not s.lock.locked() and now - s.last_used > limit(s)
         ]
         for sid in idle:
             log.info("session_reaped", session_id=sid)

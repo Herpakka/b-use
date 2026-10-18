@@ -27,7 +27,12 @@ async def list_sessions(tenant: TenantDep, services: ServicesDep) -> list[Sessio
     prefix = session_id(tenant, "")
     return [
         SessionOut(
-            name=session_name(tenant, s.id), url=s.url, tabs=s.tabs, idle_s=s.idle_s, busy=s.busy
+            name=session_name(tenant, s.id),
+            url=s.url,
+            tabs=s.tabs,
+            idle_s=s.idle_s,
+            busy=s.busy,
+            held=s.held,
         )
         for s in await services.browser.list_sessions()
         if s.id.startswith(prefix)

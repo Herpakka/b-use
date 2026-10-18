@@ -100,6 +100,7 @@ async def drive(
     """
     config = run_config(run_id, max_steps)
     stream_input: Any = payload
+    await _hold(graph, ctx, config, held=False)  # resuming: the human has answered
     while True:
         async for chunk in graph.astream(
             stream_input,
@@ -117,8 +118,18 @@ async def drive(
         snapshot = await graph.aget_state(config)
         if snapshot.interrupts:
             value = snapshot.interrupts[0].value
+            # Waiting on a person: keep the browser session (login window, filled form) alive.
+            await _hold(graph, ctx, config, held=True)
             if on_human is None:
                 return dict(snapshot.values), value
-            stream_input = Command(resume=await on_human(value))
+            answer = await on_human(value)
+            await _hold(graph, ctx, config, held=False)
+            stream_input = Command(resume=answer)
             continue
         return dict(snapshot.values), None
+
+
+async def _hold(graph: AgentGraph, ctx: AgentContext, config: Any, *, held: bool) -> None:
+    snapshot = await graph.aget_state(config)
+    if session_id := (snapshot.values or {}).get("session_id"):
+        await ctx.browser.hold(session_id, held)

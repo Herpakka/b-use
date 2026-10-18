@@ -29,6 +29,8 @@ def explain(err: PlaywrightError) -> str:
         return "another element covers it (overlay or modal?)"
     if "ERR_BLOCKED_BY_CLIENT" in text:
         return "blocked by the network policy"
+    if "ERR_TUNNEL_CONNECTION_FAILED" in text or "ERR_PROXY_CONNECTION_FAILED" in text:
+        return "refused by the egress proxy (internal address), or the proxy is not running"
     if "ERR_NAME_NOT_RESOLVED" in text:
         return "domain does not resolve"
     if "not an <input>" in text or "not an input" in text.lower():
@@ -91,21 +93,24 @@ async def _resolve(
 
 
 async def _after_interaction(
-    session: BrowserSession, page: Page, pages_before: int, blocked_before: int
+    session: BrowserSession, page: Page, pages_before: int, blocked_before: int, egress_before: int
 ) -> str:
     await settle(page)
     notes: list[str] = []
-    blocked = session.blocked_count > blocked_before
+    router_blocked = session.blocked_count > blocked_before
     if len(session.context.pages) > pages_before:
         new_page = await session.current_page()
         await settle(new_page)
-        if blocked and new_page.url == "about:blank":
+        if router_blocked and new_page.url == "about:blank":
             await new_page.close()  # a popup whose navigation the guard refused
         else:
             notes.append("opened a new tab")
-    if blocked:
+    redirect_note = await session.enforce_allowlist(
+        egress_refused=session.egress_block_count > egress_before
+    )
+    if router_blocked and not redirect_note:
         notes.append("navigation blocked: domain not allowed")
-    return "".join(f" ({n})" for n in notes)
+    return "".join(f" ({n})" for n in notes) + redirect_note
 
 
 async def execute_action(
@@ -141,13 +146,21 @@ async def execute_action(
                 if reason := navigation_reason(action.url, session.policy.allowed_domains):
                     return _result(False, f"{label} → blocked: {reason}", page)
                 blocked_before = session.blocked_count
+                egress_before = session.egress_block_count
+                error: PlaywrightError | None = None
                 try:
                     await page.goto(action.url, wait_until="domcontentloaded")
-                except PlaywrightError:
-                    if session.blocked_count == blocked_before:
-                        raise
+                except PlaywrightError as err:
+                    error = err
+                # A redirect may have left the allow-list or hit an internal address.
+                if note := await session.enforce_allowlist(
+                    egress_refused=session.egress_block_count > egress_before
+                ):
+                    return _result(False, f"{label} → blocked{note}", await session.current_page())
                 if session.blocked_count > blocked_before:  # e.g. DNS points inside
                     return _result(False, f"{label} → blocked: {session.last_blocked}", page)
+                if error is not None:
+                    raise error
                 await settle(page)
                 return _result(True, f"{label} → ok", page)
 
@@ -158,8 +171,11 @@ async def execute_action(
                         False, f"{label} → use type_text with an option label for <select>", page
                     )
                 pages_before, blocked_before = len(session.context.pages), session.blocked_count
+                egress_before = session.egress_block_count
                 await _locator(ref).click(timeout=settings.action_timeout_ms)
-                note = await _after_interaction(session, page, pages_before, blocked_before)
+                note = await _after_interaction(
+                    session, page, pages_before, blocked_before, egress_before
+                )
                 return _result(True, f"{label} → ok{note}", await session.current_page())
 
             case TypeText():
@@ -185,8 +201,11 @@ async def execute_action(
                     note = f" (selected {_quote(str(selected))})"
                 if action.submit:
                     pages_before, blocked_before = len(session.context.pages), session.blocked_count
+                    egress_before = session.egress_block_count
                     await loc.press("Enter", timeout=settings.action_timeout_ms)
-                    note += await _after_interaction(session, page, pages_before, blocked_before)
+                    note += await _after_interaction(
+                        session, page, pages_before, blocked_before, egress_before
+                    )
                 return _result(True, f"{label} → ok{note}", await session.current_page())
 
             case Scroll():

@@ -54,7 +54,7 @@ class Observation(BaseModel):
         if self.tabs > 1:
             head.append(f"Open tabs: {self.tabs} (you are on the newest one)")
         head += [f"Dialog auto-dismissed: {d}" for d in self.dialogs]
-        head += [f"Blocked navigation (domain not allowed): {b}" for b in self.blocked]
+        head += [f"Blocked by network policy: {b}" for b in self.blocked]
         head.append(
             f"[scroll: {self.scroll.above}px above · {self.scroll.below}px below"
             f" · viewport {self.scroll.viewport_height}px]"
@@ -93,6 +93,7 @@ class SessionInfo(BaseModel):
     tabs: int
     idle_s: float
     busy: bool
+    held: bool = False
 
 
 def short_url(url: str, base: str | None = None, limit: int = 80) -> str:

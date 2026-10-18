@@ -8,6 +8,7 @@ token changes on every observation, so stale attributes left on the page can nev
 from __future__ import annotations
 
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -244,7 +245,10 @@ async def build_observation(
     expansion_px: int,
     max_elements: int,
     max_text: int = 6000,
+    frame_allowed: Callable[[str], bool] | None = None,
 ) -> tuple[Observation, dict[int, ElementRef]]:
+    """``frame_allowed`` filters child frames by URL: a frame redirected off the allow-list is
+    never shown to the model."""
     token = secrets.token_hex(4)
     viewport_height = (page.viewport_size or {"height": 800})["height"]
     outline: list[int | str] = []
@@ -257,6 +261,8 @@ async def build_observation(
     frames = [main, *(f for f in page.frames if f is not main)]
     for frame in frames:
         is_main = frame is main
+        if not is_main and frame_allowed is not None and not frame_allowed(frame.url):
+            continue
         if not is_main and not await _frame_on_screen(frame, viewport_height, expansion_px):
             continue
         remaining = max_elements - len(elements)

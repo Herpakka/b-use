@@ -69,3 +69,14 @@ async def test_pool_exhaustion(tmp_path: Path) -> None:
         await small.open_session("two", allowed_domains=[])  # slot was released
     finally:
         await small.stop()
+
+
+async def test_held_sessions_get_the_longer_idle_timeout(pool: BrowserPool) -> None:
+    held = await pool.open_session("waiting-human", allowed_domains=FIXTURE_DOMAINS)
+    plain = await pool.open_session("idle-plain", allowed_domains=FIXTURE_DOMAINS)
+    held.held = True
+    after_idle = max(held.last_used, plain.last_used) + pool.settings.idle_timeout_s + 1
+    assert await pool.reap_idle(now=after_idle) == ["idle-plain"]
+    assert pool.get("waiting-human") is held
+    after_held = held.last_used + pool.settings.held_idle_timeout_s + 1
+    assert await pool.reap_idle(now=after_held) == ["waiting-human"]

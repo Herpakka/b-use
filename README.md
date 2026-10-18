@@ -47,7 +47,10 @@ uv run python -m devtools.browser_host --chrome "C:\path\to\chrome.exe"
 
 Put the printed `BU_BROWSER_WS_ENDPOINT=…` line in `.env` and recreate the app
 (`docker compose up -d --force-recreate app`). The server listens on 127.0.0.1 only and the
-executable is fixed on the host side. Consider `BU_BLOCK_RESOURCES=false` so pages show images.
+executable is fixed on the host side. It also runs the egress proxy on 127.0.0.1:3129, because
+the browser's traffic now leaves from your machine: that is where your LAN, localhost and
+metadata addresses must be refused. Keep it running while runs use the visible browser.
+Consider `BU_BLOCK_RESOURCES=false` so pages show images.
 
 ## API
 
@@ -105,12 +108,25 @@ Lint/type-check also works on the Windows host: `uv sync` then `uv run lint`.
 
 ## Guardrails already in place
 
-- Per-run domain allow-list enforced in the browser's request router (not in the prompt);
-  `localhost`, private/link-local IPs and cloud metadata endpoints are always blocked.
+Two layers, because neither can do the whole job alone (Playwright's request router never sees
+the hops of an HTTP redirect, and a proxy cannot tell a page from a subresource):
+
+- **Domain allow-list (per run).** The request router refuses navigations — main frame,
+  iframes, popups — to anything outside `allowed_domains`. Redirects are caught after the fact:
+  after every action and before every observation the tab's URL is checked, and a tab that
+  ended up outside the list is sent back to its last allowed page (a popup is closed, an
+  iframe is left out of the observation). The agent never sees or acts on such a page.
+  Subresources (CDNs, images, scripts) may come from any public host.
+- **SSRF: egress proxy.** Every browser request — navigations, redirect hops, subresources,
+  fetch/XHR, WebSockets — goes through `browser/egress.py`, which resolves the target itself,
+  refuses loopback/private/link-local/reserved/metadata addresses, and connects to exactly the
+  address it checked (no DNS rebinding window). The router additionally refuses IP literals and
+  `localhost` names up front. Service workers are disabled so nothing bypasses either layer.
 - No `eval`/JavaScript action is exposed to the model.
 - Page content reaches the model inside `<page_content>` delimiters and is declared untrusted.
 - Clicks/submits that look irreversible (pay, buy, delete, send, ยืนยัน, ลบ, …) always pause for
-  human approval — a code policy, not a prompt request.
+  human approval — a code policy, not a prompt request. It matches words on the element, so a
+  button like "Complete order" without such a word is not caught yet (phase 4.2).
 - Three loop guards: `BU_MAX_STEPS`, `BU_BUDGET_USD`, `BU_RUN_TIMEOUT_S`; per-tenant rate limit,
   active-run limit and a cap on client-requested budgets.
 - Text typed into password fields is masked in events. Credentials written into the task text

@@ -13,7 +13,7 @@ from playwright.async_api import Error as PlaywrightError
 from browser.actions import AnyAction
 from browser.dom import ElementRef, build_observation
 from browser.executor import execute_action
-from browser.guards import NetworkPolicy
+from browser.guards import NetworkPolicy, navigation_reason
 from browser.models import ActionResult, Observation, SessionInfo, clip_message, short_url
 from browser.screencast import screencast, take_screenshot
 from core.config import Settings
@@ -38,6 +38,9 @@ class BrowserSession:
         self.lock = asyncio.Lock()
         self.last_used = time.monotonic()
         self.closed = False
+        # Set while the run waits for a human: the reaper then allows a much longer idle time,
+        # so a login window or half-filled form is still there when the answer comes.
+        self.held = False
         self.refs: dict[int, ElementRef] = {}
         self.dom_version: str | None = None
         self.last_observation: Observation | None = None
@@ -45,12 +48,16 @@ class BrowserSession:
         self._attached: set[Page] = set()
         self._dialogs: list[str] = []
         self._blocked: list[str] = []  # reported (then cleared) by the next observation
-        self._blocked_total = 0
+        self._blocked_total = 0  # refused navigations (router or redirect check)
+        self._egress_total = 0  # requests the egress proxy refused (any kind)
         self._last_blocked = ""
+        self._last_allowed: dict[Page, str] = {}
+        self._first_page: Page | None = None
 
     async def start(self) -> None:
         self.context.on("page", self._attach)
         page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+        self._first_page = page
         self._attach(page)
 
     def _attach(self, page: Page) -> None:
@@ -78,9 +85,58 @@ class BrowserSession:
         self._blocked_total += 1
         self._blocked.append(f"{short_url(url)} ({reason})")
 
+    def record_egress_block(self, target: str, reason: str) -> None:
+        self._last_blocked = reason
+        self._egress_total += 1
+        self._blocked.append(f"{target} ({reason})")
+
     @property
     def blocked_count(self) -> int:
         return self._blocked_total
+
+    @property
+    def egress_block_count(self) -> int:
+        return self._egress_total
+
+    def frame_allowed(self, url: str) -> bool:
+        if url.startswith(("about:", "data:", "blob:")):
+            return True
+        return navigation_reason(url, self.policy.allowed_domains) is None
+
+    async def enforce_allowlist(self, *, egress_refused: bool = False) -> str:
+        """Undo a navigation that ended outside the allow-list.
+
+        Redirect hops never reach the request router, so a page on an allowed domain can
+        bounce the tab anywhere. This runs after every action and before every observation:
+        a tab that ended up outside the allowed domains is sent back to its last allowed URL
+        (a popup with none is closed). Requests to internal addresses never got this far —
+        the egress proxy refused them — but the tab is left on an error page, handled the
+        same way. Returns a note for the action's result line ("" if nothing happened).
+        """
+        page = await self.current_page()
+        url = page.url
+        if url.startswith("chrome-error://"):
+            if not egress_refused:
+                return ""  # an ordinary network error: the action's own message says so
+            note = f" (navigation blocked: {self._last_blocked})"
+        elif url == "about:blank" or self.frame_allowed(url):
+            self._last_allowed[page] = url
+            return ""
+        else:
+            reason = navigation_reason(url, self.policy.allowed_domains) or "not allowed"
+            self.record_blocked(url, f"redirected outside the allowed domains: {reason}")
+            note = f" (redirect to {short_url(url)} blocked)"
+        back = self._last_allowed.get(page)
+        try:
+            if back and back != "about:blank":
+                await page.goto(back, wait_until="domcontentloaded")
+            elif page is not self._first_page:
+                await page.close()  # a popup that never showed an allowed page
+            else:
+                await page.goto("about:blank")
+        except PlaywrightError:
+            pass
+        return note
 
     @property
     def last_blocked(self) -> str:
@@ -99,11 +155,13 @@ class BrowserSession:
     async def observe(self, *, screenshot: bool = False) -> Observation:
         async with self.lock:
             self.touch()
+            await self.enforce_allowlist()
             page = await self.current_page()
             obs, refs = await build_observation(
                 page,
                 expansion_px=self.settings.viewport_expansion_px,
                 max_elements=self.settings.max_elements,
+                frame_allowed=self.frame_allowed,
             )
             update: dict[str, object] = {"dialogs": self._dialogs, "blocked": self._blocked}
             if screenshot:
@@ -133,6 +191,7 @@ class BrowserSession:
             tabs=len(self.context.pages),
             idle_s=round(time.monotonic() - self.last_used, 1),
             busy=self.lock.locked(),
+            held=self.held,
         )
 
     async def frames(self) -> AsyncGenerator[bytes, None]:

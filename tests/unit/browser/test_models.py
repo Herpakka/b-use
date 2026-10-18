@@ -50,7 +50,7 @@ def test_render_reports_dialogs_blocked_and_tabs() -> None:
     text = _obs(tabs=2, dialogs=["alert: hi"], blocked=["https://x.test/ (nope)"]).render()
     assert "Open tabs: 2" in text
     assert "Dialog auto-dismissed: alert: hi" in text
-    assert "Blocked navigation (domain not allowed): https://x.test/ (nope)" in text
+    assert "Blocked by network policy: https://x.test/ (nope)" in text
 
 
 def test_render_element_variants() -> None:

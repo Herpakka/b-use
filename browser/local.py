@@ -48,6 +48,11 @@ class LocalBrowserService:
     async def list_sessions(self) -> list[SessionInfo]:
         return [s.info() for s in self.pool.sessions()]
 
+    async def hold(self, session_id: str, held: bool) -> None:
+        if session := self.pool.get(session_id):
+            session.held = held
+            session.touch()
+
     async def screencast(self, session_id: str) -> AsyncIterator[bytes]:
         async for frame in self._get(session_id).frames():
             yield frame

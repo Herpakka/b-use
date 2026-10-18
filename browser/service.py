@@ -36,6 +36,10 @@ class BrowserService(Protocol):
 
     async def list_sessions(self) -> list[SessionInfo]: ...
 
+    async def hold(self, session_id: str, held: bool) -> None:
+        """Mark a session as waiting for a human (longer idle timeout). Unknown ids: no-op."""
+        ...
+
     def screencast(self, session_id: str) -> AsyncIterator[bytes]:
         """Live JPEG frames; raises SessionNotFoundError when iterated if the id is unknown."""
         ...

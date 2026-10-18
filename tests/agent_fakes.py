@@ -122,6 +122,7 @@ class FakeBrowser:
         self.sessions: set[str] = set()
         self.executed: list[AnyAction] = []
         self.closed: list[str] = []
+        self.held: set[str] = set()
         self._version = 0
 
     def _require(self, session_id: str) -> None:
@@ -171,6 +172,9 @@ class FakeBrowser:
     async def close(self, session_id: str) -> None:
         self.sessions.discard(session_id)
         self.closed.append(session_id)
+
+    async def hold(self, session_id: str, held: bool) -> None:
+        (self.held.add if held else self.held.discard)(session_id)
 
     async def list_sessions(self) -> list[SessionInfo]:
         return [

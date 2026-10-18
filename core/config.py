@@ -51,10 +51,22 @@ class Settings(BaseSettings):
     # Drive a browser served elsewhere instead of launching one, e.g. the visible Chromium from
     # `python -m devtools.browser_host`: ws://host.docker.internal:3010/<token>
     browser_ws_endpoint: str | None = None
+    # Every browser request goes through the egress proxy (browser/egress.py), which refuses
+    # private/internal addresses — including redirect hops the request router never sees.
+    # With a local browser the pool runs it on 127.0.0.1; a remote browser uses the one that
+    # devtools.browser_host runs beside it (password = the endpoint's token).
+    egress_proxy: bool = True
+    egress_listen_host: str = "127.0.0.1"
+    egress_listen_port: int = 0
+    # The proxy URL as the *browser* reaches it. None = the local proxy's address, or
+    # http://127.0.0.1:3129 (browser_host's default) for a remote browser.
+    egress_browser_url: str | None = None
     headless: bool = True
     max_contexts: int = 4
     pool_acquire_timeout_s: float = 30
     idle_timeout_s: float = 600
+    # Sessions whose run waits for a human (login, captcha, approval) are kept this long.
+    held_idle_timeout_s: float = 7200
     reaper_interval_s: float = 60
     block_resources: bool = True
     sessions_dir: Path = Path(".data/sessions")

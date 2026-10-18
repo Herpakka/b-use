@@ -161,6 +161,7 @@ def test_approval_flow_over_the_api() -> None:
         assert paused["pending"]["kind"] == "approval"
         assert paused["pending"]["action"] == 'Click [2] "Place order"'
         assert Click(index=2) not in browser.executed
+        assert browser.held == {f"acme.{run['id']}"}  # the reaper leaves it alone
 
         assert (
             client.post(f"/v1/runs/{run['id']}/resume", json={}, headers=AUTH_B).status_code == 404
@@ -170,6 +171,7 @@ def test_approval_flow_over_the_api() -> None:
         done = wait_for(client, run["id"], status_in("done"))
         assert done["pending"] is None
         assert Click(index=2) in browser.executed
+        assert browser.held == set()
         again = client.post(f"/v1/runs/{run['id']}/resume", json={}, headers=AUTH_A)
         assert again.status_code == 409
         assert "resumed" in event_types(client, run["id"])

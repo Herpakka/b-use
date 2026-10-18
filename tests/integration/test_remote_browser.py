@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import os
 import secrets
 import socket
@@ -13,6 +14,7 @@ import pytest
 from playwright._impl._driver import get_driver_env
 
 from browser.actions import Navigate
+from browser.egress import EgressProxy, IPAddress, system_resolve
 from browser.pool import BrowserPool, loopback_host_header, redact_endpoint
 from devtools.browser_host import server_command
 from tests.browser_utils import FIXTURE_DOMAINS, find, goto, serve_fixtures
@@ -51,6 +53,17 @@ async def endpoint() -> AsyncIterator[str]:
     await proc.wait()
 
 
+def test_remote_mode_uses_the_proxy_beside_the_browser(tmp_path: Path) -> None:
+    remote = make_settings(tmp_path, browser_ws_endpoint="ws://host.docker.internal:3010/tok3n")
+    pool = BrowserPool(remote)
+    assert pool.egress is None  # no proxy in this process: traffic leaves from the host
+    proxy = pool.context_proxy("acme.run-1")
+    assert proxy is not None
+    assert proxy["server"] == "http://127.0.0.1:3129" and proxy["password"] == "tok3n"
+    local = BrowserPool(make_settings(tmp_path))
+    assert local.egress is not None
+
+
 def test_endpoint_helpers() -> None:
     url = "ws://host.docker.internal:3010/s3cret-token"
     assert loopback_host_header(url) == {"Host": "localhost:3010"}
@@ -59,7 +72,21 @@ def test_endpoint_helpers() -> None:
 
 
 async def test_pool_drives_a_served_browser(endpoint: str, tmp_path: Path) -> None:
-    pool = BrowserPool(make_settings(tmp_path, browser_ws_endpoint=endpoint))
+    # What browser_host runs beside the browser: the egress proxy, keyed by the endpoint token.
+    async def resolve(host: str, port: int) -> list[IPAddress]:
+        if host == "internal.test":  # an intranet name that resolves to a private address
+            return [ipaddress.ip_address("10.0.0.5")]
+        return await system_resolve(host, port)
+
+    egress = EgressProxy(password=endpoint.rsplit("/", 1)[1], resolve=resolve)
+    await egress.start()
+    pool = BrowserPool(
+        make_settings(
+            tmp_path,
+            browser_ws_endpoint=endpoint,
+            egress_browser_url=f"http://127.0.0.1:{egress.port}",
+        )
+    )
     await pool.start()
     try:
         s = await pool.open_session("remote-1", allowed_domains=FIXTURE_DOMAINS)
@@ -75,5 +102,13 @@ async def test_pool_drives_a_served_browser(endpoint: str, tmp_path: Path) -> No
         await frames.aclose()
         assert frame.startswith(b"\xff\xd8\xff")
         assert [i.id for i in [s.info()]] == ["remote-1"]
+        # a page request to an internal name passes the router (no DNS there) and is refused
+        # by the proxy beside the browser
+        page = await s.current_page()
+        await page.evaluate(
+            "() => fetch('https://internal.test/', {mode: 'no-cors'}).catch(() => null)"
+        )
+        assert any("internal.test" in target for _, target, _ in egress.blocked)
     finally:
         await pool.stop()
+        await egress.stop()

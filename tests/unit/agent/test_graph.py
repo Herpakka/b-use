@@ -207,6 +207,7 @@ async def test_paused_run_survives_a_restart() -> None:
     state, pending, _ = await run_task(ctx, saver=saver, run_id="run-restart")
     assert pending is not None and pending["kind"] == "approval"
     assert state["status"] == "needs_human"
+    assert browser.held == {state["session_id"]}  # kept alive while the human decides
 
     # "Restart": a fresh browser with no sessions and fresh models, same checkpoint store.
     browser2 = FakeBrowser(SHOP)
@@ -257,3 +258,17 @@ async def test_extract_not_found_is_an_error_step() -> None:
         "↺ reflected: Not on page.",
     ]
     assert final["findings"] == []  # NOT FOUND is not a finding
+
+
+async def test_session_is_held_only_while_the_human_decides() -> None:
+    held_during: list[set[str]] = []
+    browser = FakeBrowser(SHOP, results=[clicked('click [2] "Place order" → ok')])
+
+    async def approve(payload: dict[str, Any]) -> dict[str, Any]:
+        held_during.append(set(browser.held))
+        return {"approved": True}
+
+    ctx = make_ctx(browser, [PLAN, tool("Click", index=2), tool("Done", result="ok")])
+    final, _, _ = await run_task(ctx, on_human=approve)
+    assert held_during == [{final["session_id"]}]
+    assert browser.held == set()
