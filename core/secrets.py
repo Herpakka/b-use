@@ -221,6 +221,10 @@ class StaticSecretStore:
                 name, s.value.get_secret_value(), normalize_domains(s.domains)
             )
 
+    @property
+    def secrets(self) -> dict[str, Secret]:
+        return dict(self._secrets)
+
     async def get(self, scope: str, name: str) -> Secret | None:
         return self._secrets.get(name)
 

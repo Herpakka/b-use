@@ -7,6 +7,8 @@ from core.store import MemoryRunStore, RunRecord, utcnow
 from tests.agent_fakes import PLAN, FakeBrowser, tool
 from tests.api_support import AUTH_A, AUTH_B, SHOP, client_for, memory_factory, start_run
 
+LIVE = utcnow() + timedelta(hours=1)
+
 
 def past_run(store: MemoryRunStore, tenant: str, status: str, cost: float, **kw: object) -> None:
     run = RunRecord.model_validate(
@@ -28,7 +30,8 @@ def past_run(store: MemoryRunStore, tenant: str, status: str, cost: float, **kw:
 def test_tenant_cap_shrinks_then_refuses_runs() -> None:
     store = MemoryRunStore()
     past_run(store, "acme", "done", 0.10)
-    past_run(store, "acme", "needs_human", 0.01, budget_usd=0.05)  # reserved at its full budget
+    # paused on a live replica, reserved at its full budget
+    past_run(store, "acme", "needs_human", 0.01, budget_usd=0.05, owner="other", lease_until=LIVE)
     past_run(store, "acme", "done", 5.0, created_at=month_start() - timedelta(days=1))  # last month
     past_run(store, "globex", "done", 0.05)  # counted against globex only
     factory = memory_factory(FakeBrowser(SHOP), [PLAN, tool("Done", result="ok")], store=store)

@@ -19,6 +19,7 @@ from agent.context import AgentContext
 from agent.graph import compile_graph
 from agent.llm import make_chat_model
 from agent.runner import drive, initial_state, limits_from, open_checkpointer
+from agent.tracing import make_tracer
 from browser.local import local_browser
 from core.config import Settings, get_settings
 from core.costs import PriceTable
@@ -94,6 +95,7 @@ async def _main(args: argparse.Namespace, settings: Settings) -> int:
             settings=settings,
             prices=prices,
             secrets=StaticSecretStore(settings.local_secrets).get,
+            tracer=make_tracer(settings),
         )
         async with open_checkpointer(settings, memory=args.memory) as saver:
             graph = compile_graph(saver)
@@ -138,7 +140,10 @@ async def _main(args: argparse.Namespace, settings: Settings) -> int:
                 max_steps=limits["max_steps"],
                 on_event=print_event,
                 on_human=ask_stdin,
+                trace_tags=["cli"],
             )
+    if ctx.tracer is not None:
+        ctx.tracer.flush()
     print_summary(final, run_id)
     return 0 if final.get("status") == "done" else 1
 

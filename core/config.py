@@ -37,6 +37,21 @@ class Settings(BaseSettings):
     model_prices: dict[str, tuple[float, float]] = Field(default_factory=dict)
     llm_timeout_s: float = 60
 
+    # --- tracing (Langfuse, agent/tracing.py): on when both keys are set. The SDK's own
+    # LANGFUSE_* names work too.
+    langfuse_public_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("BU_LANGFUSE_PUBLIC_KEY", "LANGFUSE_PUBLIC_KEY"),
+    )
+    langfuse_secret_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("BU_LANGFUSE_SECRET_KEY", "LANGFUSE_SECRET_KEY"),
+    )
+    langfuse_host: str = Field(
+        default="http://localhost:3000",
+        validation_alias=AliasChoices("BU_LANGFUSE_HOST", "LANGFUSE_HOST", "LANGFUSE_BASE_URL"),
+    )
+
     # --- infra
     database_url: str = "postgresql://bu:bu@localhost:5432/bu"
     redis_url: str = "redis://localhost:6379/0"
@@ -50,6 +65,12 @@ class Settings(BaseSettings):
     max_active_runs_per_tenant: int = 3
     max_budget_usd: float = 1.0  # cap on a per-run budget a client may request
     sse_heartbeat_s: float = 15
+    # --- replicas (api/manager.py). Unique per replica; default: the hostname (a container's
+    # id), which stays the same across restarts, so a restarted replica takes its runs back.
+    replica_id: str | None = None
+    run_lease_s: float = 30
+    # On SIGTERM: how long running runs may take to finish before they are handed over.
+    drain_timeout_s: float = 60
     debug_page: bool = True
 
     # --- secrets: {{SECRET:name}} placeholders (core/secrets.py)
@@ -120,7 +141,14 @@ class Settings(BaseSettings):
     history_window: int = 20
     findings_window: int = 8
 
-    @field_validator("browser_ws_endpoint", "egress_browser_url", "secrets_key", mode="before")
+    @field_validator(
+        "browser_ws_endpoint",
+        "egress_browser_url",
+        "secrets_key",
+        "langfuse_public_key",
+        "langfuse_secret_key",
+        mode="before",
+    )
     @classmethod
     def _blank_is_unset(cls, v: object) -> object:
         # `BU_BROWSER_WS_ENDPOINT=` must mean "no remote browser" — an empty string would

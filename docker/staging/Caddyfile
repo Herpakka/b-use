@@ -1,0 +1,23 @@
+{
+	admin off
+}
+
+:8080 {
+	# Metrics are for Prometheus on the internal network, not for clients.
+	@internal path /metrics
+	respond @internal 404
+
+	reverse_proxy browser-use-staging-app-1:8000 browser-use-staging-app-2:8000 {
+		# Browsers stick to one replica (the live view needs the replica that holds the
+		# session); API clients without cookies are spread across both.
+		lb_policy cookie bu_replica
+		# A replica that is restarting or draining: try the other one.
+		lb_try_duration 15s
+		lb_try_interval 250ms
+		health_uri /readyz
+		health_interval 5s
+		health_timeout 3s
+		# Server-sent events must be passed on as they come.
+		flush_interval -1
+	}
+}

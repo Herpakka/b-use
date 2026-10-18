@@ -1,0 +1,67 @@
+# Production image: multi-stage, headless Chromium only, no dev tools. Target: < 1.5 GB.
+#   docker build -f docker/Dockerfile.prod -t browser-use:prod .
+# (docker/Dockerfile is the dev image: Playwright's full image, dev dependencies, live source.)
+
+FROM python:3.12-slim-bookworm AS base
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PATH=/opt/venv/bin:$PATH
+
+# ---------------------------------------------------------------- browsers: changes rarely
+# The headless shell only (no headed Chromium, Firefox or WebKit) plus its system libraries,
+# installed by a throwaway Playwright CLI so this layer stays cached when the app changes.
+# Its version must match the `playwright==` pin in pyproject.toml.
+# tini is PID 1 so Chromium's child processes are reaped instead of piling up as zombies.
+FROM base AS browsers
+RUN pip install --no-cache-dir playwright==1.63.0 \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends tini \
+    && playwright install --with-deps --only-shell chromium \
+    && pip uninstall -y playwright pip \
+    && rm -rf /var/lib/apt/lists/* /root/.cache \
+    && useradd --create-home --uid 10001 app \
+    && mkdir -p /data/sessions \
+    && chown -R app:app /data
+
+# ---------------------------------------------------------------- build: the venv
+FROM base AS build
+COPY --from=ghcr.io/astral-sh/uv:0.9.29 /uv /usr/local/bin/
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=0 \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_HTTP_TIMEOUT=300
+WORKDIR /src
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --frozen --no-dev --no-install-project
+COPY api ./api
+COPY agent ./agent
+COPY browser ./browser
+COPY core ./core
+COPY devtools ./devtools
+COPY evals ./evals
+COPY bu_client ./bu_client
+# A real install (not editable): the runtime stage needs no source tree.
+RUN uv sync --frozen --no-dev --no-editable \
+    && find /opt/venv -type d \( -name tests -o -name test \) -prune -exec rm -rf {} +
+
+# ---------------------------------------------------------------- runtime
+FROM browsers AS runtime
+COPY --from=build /opt/venv /opt/venv
+# No precompiled bytecode in the image (−50 MB): Python caches it under /tmp on first import.
+ENV BU_SESSIONS_DIR=/data/sessions \
+    BU_ENV=prod \
+    BU_DEBUG_PAGE=false \
+    PYTHONDONTWRITEBYTECODE= \
+    PYTHONPYCACHEPREFIX=/tmp/pycache
+USER app
+WORKDIR /home/app
+EXPOSE 8000
+HEALTHCHECK --interval=15s --timeout=3s --start-period=20s \
+    CMD python -c "import urllib.request,sys; sys.exit(urllib.request.urlopen('http://127.0.0.1:8000/healthz').status != 200)"
+ENTRYPOINT ["tini", "--"]
+# SSE streams would hold a graceful shutdown open forever: cut them after 10 s (clients
+# reconnect with Last-Event-ID, to another replica). Runs drain in the app's own shutdown.
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", \
+     "--timeout-graceful-shutdown", "10", "--proxy-headers", "--forwarded-allow-ips", "*"]

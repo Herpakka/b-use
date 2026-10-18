@@ -132,6 +132,7 @@ class FakeBrowser:
         self.closed: list[str] = []  # closed with cookies saved
         self.forgotten: list[str] = []  # closed with cookies deleted
         self.held: set[str] = set()
+        self.capacity = 4  # browser contexts it reports it can hold
         self.secrets: list[dict[str, Secret]] = []  # the values handed over with each action
         self._version = 0
 
@@ -203,7 +204,9 @@ class FakeBrowser:
         ]
 
     async def health(self) -> BrowserHealth:
-        return BrowserHealth(ok=True, detail="ok", sessions=len(self.sessions), max_sessions=4)
+        return BrowserHealth(
+            ok=True, detail="ok", sessions=len(self.sessions), max_sessions=self.capacity
+        )
 
     async def screencast(self, session_id: str) -> AsyncIterator[bytes]:
         self._require(session_id)

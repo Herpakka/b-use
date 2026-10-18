@@ -13,8 +13,10 @@ from agent.routing import limit_reason
 from agent.state import AgentState, PendingTool
 from agent.tools import ACTION_TOOL_SPECS
 from browser.service import SessionNotFoundError
+from core.logging import get_logger
 
 VISION_AFTER_REFLECTIONS = 2
+log = get_logger("agent.decide")
 
 
 async def decide_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
@@ -31,6 +33,9 @@ async def decide_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict
                 await ctx.browser.screenshot(state["session_id"])
             ).decode()
         except SessionNotFoundError:
+            screenshot = None
+        except Exception as err:  # a screenshot is optional context: never fail the run on it
+            log.warning("screenshot_skipped", error=str(err).splitlines()[0][:200])
             screenshot = None
 
     messages = build_decide_messages(state, ctx.settings, screenshot)

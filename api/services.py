@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 from agent.context import AgentContext
 from agent.graph import compile_graph
 from agent.llm import make_chat_model
+from agent.tracing import Tracer, make_tracer
 from api.janitor import Janitor
 from api.manager import RunManager
 from browser.local import local_browser
@@ -24,9 +26,11 @@ from core.costs import PriceTable
 from core.logging import get_logger
 from core.ratelimit import LocalRateLimiter, RateLimiter, RedisRateLimiter
 from core.secrets import MemorySecretStore, PostgresSecretStore, SecretCipher, SecretStore
-from core.store import PostgresRunStore, RunStore
+from core.store import PostgresRunStore, RunStore, advisory_lock
 
 log = get_logger("api.services")
+
+SCHEMA_LOCK = 0x62755F736368  # "bu_sch"
 
 
 @dataclass
@@ -44,7 +48,10 @@ ServicesFactory = Callable[[Settings], AbstractAsyncContextManager[Services]]
 
 
 def agent_context(
-    settings: Settings, browser: BrowserService, secrets: SecretStore | None = None
+    settings: Settings,
+    browser: BrowserService,
+    secrets: SecretStore | None = None,
+    tracer: Tracer | None = None,
 ) -> AgentContext | None:
     if settings.openai_api_key is None:
         log.warning("openai_key_missing", hint="runs are refused until BU_OPENAI_API_KEY is set")
@@ -58,6 +65,7 @@ def agent_context(
         settings=settings,
         prices=prices,
         secrets=secrets.get if secrets is not None else None,
+        tracer=tracer,
     )
 
 
@@ -76,12 +84,15 @@ async def build_services(settings: Settings) -> AsyncIterator[Services]:
         await pool.open(wait=True, timeout=30)
         stack.push_async_callback(pool.close)
         store = PostgresRunStore(pool)
-        await store.setup()
         saver = AsyncPostgresSaver(pool)
-        await saver.setup()
         cipher = SecretCipher.from_setting(settings.secrets_key)
         secrets = PostgresSecretStore(pool, cipher)
-        await secrets.setup()
+        # Replicas start together: one at a time through the schema, or concurrent
+        # CREATE ... IF NOT EXISTS can still collide.
+        async with pool.connection() as conn, advisory_lock(conn, SCHEMA_LOCK):
+            await store.setup()
+            await saver.setup()
+            await secrets.setup()
         if cipher is None:
             log.info("secrets_disabled", hint="set BU_SECRETS_KEY to use {{SECRET:name}}")
 
@@ -95,17 +106,20 @@ async def build_services(settings: Settings) -> AsyncIterator[Services]:
         stack.push_async_callback(bus.close)
 
         browser = await stack.enter_async_context(local_browser(settings))
+        tracer = make_tracer(settings)
+        if tracer is not None:
+            stack.push_async_callback(asyncio.to_thread, tracer.shutdown)
         manager = RunManager(
             store=store,
             bus=bus,
             browser=browser,
             graph=compile_graph(saver),
-            ctx=agent_context(settings, browser, secrets if secrets.available else None),
+            ctx=agent_context(settings, browser, secrets if secrets.available else None, tracer),
             settings=settings,
             secrets=secrets if secrets.available else None,
         )
         stack.push_async_callback(manager.shutdown)
-        await manager.recover()
+        await manager.start()
         janitor = Janitor(store, saver, settings)
         janitor.start()
         stack.push_async_callback(janitor.stop)

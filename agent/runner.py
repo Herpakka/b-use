@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import inspect
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -94,6 +94,8 @@ async def drive(
     max_steps: int,
     on_event: EventSink | None = None,
     on_human: HumanHandler | None = None,
+    trace_user: str | None = None,
+    trace_tags: Sequence[str] = (),
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Run until the graph ends or pauses.
 
@@ -101,12 +103,15 @@ async def drive(
     and no ``on_human`` handler was given. ``payload=None`` resumes from the last checkpoint.
     """
     config = run_config(run_id, max_steps)
+    stream_config: Any = config
+    if ctx.tracer is not None:
+        stream_config = {**config, **ctx.tracer.config(run_id, user=trace_user, tags=trace_tags)}
     stream_input: Any = payload
     await _hold(graph, ctx, config, held=False)  # resuming: the human has answered
     while True:
         async for chunk in graph.astream(
             stream_input,
-            config,
+            stream_config,
             context=ctx,
             stream_mode="updates",
             # Persist each checkpoint before the next step so a killed process resumes cleanly.

@@ -1,6 +1,7 @@
 """Run a YAML task suite against the real agent and report success / steps / cost / duration.
 
-uv run python -m evals.runner evals/smoke.yaml [--only books-price] [--min-pass 10]
+uv run python -m evals.runner evals/tasks.yaml [--only books-price] [--min-rate 0.7]
+    [--har record|replay|replay-strict] [--summary-md $GITHUB_STEP_SUMMARY]
 """
 
 from __future__ import annotations
@@ -27,11 +28,15 @@ from agent.graph import compile_graph
 from agent.llm import make_chat_model
 from agent.prompts import prompt_version
 from agent.runner import HumanHandler, drive, initial_state, limits_from, open_checkpointer
-from browser.local import local_browser
-from core.config import Settings, get_settings
+from agent.tracing import make_tracer
+from browser.local import LocalBrowserService
+from browser.pool import BrowserPool
+from core.config import Settings, StaticSecret, get_settings
 from core.costs import PriceTable
 from core.logging import configure_logging
-from core.secrets import StaticSecretStore
+from core.secrets import Secret, StaticSecretStore
+from evals import report as report_md
+from evals.har import HarBrowserService, HarMode
 
 
 class Expect(BaseModel):
@@ -49,10 +54,23 @@ class EvalTask(BaseModel):
     expect: Expect
     human: str = "deny"
     max_steps: int | None = None
+    secrets: dict[str, StaticSecret] = Field(default_factory=dict)
 
 
 class Suite(BaseModel):
-    tasks: list[EvalTask]
+    include: list[str] = Field(default_factory=list)  # other suites, relative to this file
+    tasks: list[EvalTask] = Field(default_factory=list)
+
+
+def load_suite(path: Path) -> list[EvalTask]:
+    suite = Suite.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
+    tasks = [t for inc in suite.include for t in load_suite(path.parent / inc)] + suite.tasks
+    seen: set[str] = set()
+    for t in tasks:
+        if t.id in seen:
+            raise ValueError(f"{path}: task id {t.id!r} appears twice")
+        seen.add(t.id)
+    return tasks
 
 
 @dataclass
@@ -101,26 +119,45 @@ def responder(policy: str) -> HumanHandler:
 
 
 async def run_suite(
-    tasks: list[EvalTask], settings: Settings, *, memory: bool, verbose: bool
+    tasks: list[EvalTask],
+    settings: Settings,
+    *,
+    memory: bool,
+    verbose: bool,
+    har: HarMode | None = None,
+    har_dir: Path = Path("evals/har"),
+    suite_name: str = "suite",
 ) -> list[TaskResult]:
     prices = PriceTable.from_settings(settings)
     prices.require(settings.model_decide, settings.model_small)
     results: list[TaskResult] = []
     tag = secrets.token_hex(3)
+    static = StaticSecretStore(settings.local_secrets)
+    task_secrets: dict[str, Secret] = {}
+
+    async def resolve(scope: str, name: str) -> Secret | None:
+        return task_secrets.get(name) or await static.get(scope, name)
+
     async with (
-        local_browser(settings) as browser,
+        BrowserPool(settings) as pool,
         open_checkpointer(settings, memory=memory) as saver,
     ):
+        browser = HarBrowserService(pool, har, har_dir) if har else None
         ctx = AgentContext(
-            browser=browser,
+            browser=browser or LocalBrowserService(pool),
             llm_decide=make_chat_model(settings, settings.model_decide),
             llm_small=make_chat_model(settings, settings.model_small),
             settings=settings,
             prices=prices,
-            secrets=StaticSecretStore(settings.local_secrets).get,
+            secrets=resolve,
+            tracer=make_tracer(settings),
         )
         graph = compile_graph(saver)
         for t in tasks:
+            if browser is not None:
+                browser.task_id = t.id
+            task_secrets.clear()
+            task_secrets.update(StaticSecretStore(t.secrets).secrets)
             run_id = f"eval-{t.id}-{tag}"
             limits = limits_from(settings, max_steps=t.max_steps)
             state = initial_state(
@@ -142,6 +179,7 @@ async def run_suite(
                     max_steps=limits["max_steps"],
                     on_event=print_event if verbose else None,
                     on_human=responder(t.human),
+                    trace_tags=["eval", suite_name, t.id],
                 )
                 passed, why = check(t.expect, final)
             except Exception as err:  # one broken task must not end the suite
@@ -163,6 +201,8 @@ async def run_suite(
                 f"\n  answer: {(r.result or '')[:200]}",
                 flush=True,
             )
+        if ctx.tracer is not None:
+            ctx.tracer.flush()
     return results
 
 
@@ -188,6 +228,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("suite", type=Path)
     parser.add_argument("--only", action="append", help="task id to run; repeatable")
     parser.add_argument("--min-pass", type=int, default=0, help="exit 1 below this many passes")
+    parser.add_argument(
+        "--min-rate", type=float, default=0.0, help="exit 1 below this success rate"
+    )
+    parser.add_argument("--har", choices=["record", "replay", "replay-strict"])
+    parser.add_argument("--har-dir", type=Path, default=Path("evals/har"))
+    parser.add_argument("--summary-md", type=Path, help="append a Markdown summary here")
     parser.add_argument("--postgres", action="store_true", help="checkpoint to Postgres")
     parser.add_argument("-v", "--verbose", action="store_true", help="print every step")
     parser.add_argument("--report-dir", type=Path, default=Path("evals/reports"))
@@ -198,11 +244,18 @@ def main(argv: list[str] | None = None) -> int:
     if settings.openai_api_key is None:
         print("BU_OPENAI_API_KEY is not set (put it in .env)", file=sys.stderr)
         return 2
-    suite = Suite.model_validate(yaml.safe_load(args.suite.read_text(encoding="utf-8")))
-    tasks = [t for t in suite.tasks if not args.only or t.id in args.only]
+    tasks = [t for t in load_suite(args.suite) if not args.only or t.id in args.only]
 
     results = asyncio.run(
-        run_suite(tasks, settings, memory=not args.postgres, verbose=args.verbose)
+        run_suite(
+            tasks,
+            settings,
+            memory=not args.postgres,
+            verbose=args.verbose,
+            har=args.har,
+            har_dir=args.har_dir,
+            suite_name=args.suite.stem,
+        )
     )
     summary = summarize(results)
     print(f"\n{json.dumps(summary, indent=2)}")
@@ -226,7 +279,10 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8",
     )
     print(f"report: {report}")
-    return 0 if summary["passed"] >= args.min_pass else 1
+    if args.summary_md:
+        report_md.main([str(report), "--out", str(args.summary_md)])
+    ok = summary["passed"] >= args.min_pass and summary["success_rate"] >= args.min_rate
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

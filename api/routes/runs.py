@@ -25,7 +25,8 @@ async def _run(services: Services, tenant: str, run_id: str) -> RunRecord:
 
 
 def _raise(err: RunError) -> HTTPException:
-    return HTTPException(err.status, err.detail)
+    headers = {"Retry-After": str(err.retry_after)} if err.retry_after else None
+    return HTTPException(err.status, err.detail, headers)
 
 
 @router.post("", status_code=202, response_model=RunOut)

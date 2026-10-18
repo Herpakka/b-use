@@ -7,8 +7,9 @@ single-process experiments. Agent checkpoints live separately (LangGraph's table
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
-from datetime import UTC, datetime
+from collections.abc import AsyncIterator, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
 
 from psycopg import sql
@@ -48,6 +49,11 @@ class RunRecord(BaseModel):
     updated_at: datetime = Field(default_factory=utcnow)
     finished_at: datetime | None = None
     purged_at: datetime | None = None  # when its agent checkpoints were deleted
+    # Multi-replica ownership: the replica holding a live lease runs the run (or keeps its
+    # paused browser session); ``command`` is a resume/cancel waiting for that replica.
+    owner: str | None = None
+    lease_until: datetime | None = None
+    command: dict[str, Any] | None = None
 
 
 class RunEvent(BaseModel):
@@ -71,6 +77,9 @@ UPDATABLE = frozenset(
         "pending",
         "finished_at",
         "purged_at",
+        "owner",
+        "lease_until",
+        "command",
     }
 )
 
@@ -96,6 +105,12 @@ class RunStore(Protocol):
     async def list_runs(self, tenant: str, limit: int = 50) -> list[RunRecord]: ...
     async def runs_with_status(self, statuses: Sequence[str]) -> list[RunRecord]: ...
     async def count_active(self, tenant: str) -> int: ...
+    # ownership (api.manager)
+    async def claim(self, run_id: str, owner: str, lease_s: float) -> RunRecord | None: ...
+    async def renew(self, owner: str, run_ids: Sequence[str], lease_s: float) -> list[str]: ...
+    async def release(self, run_id: str, owner: str) -> None: ...
+    async def orphaned(self, also_owner: str | None = None) -> list[RunRecord]: ...
+    def admission(self) -> AbstractAsyncContextManager[None]: ...
     async def usage(self, since: datetime, tenant: str | None = None) -> Usage: ...
     async def update_run(self, run_id: str, **fields: Any) -> RunRecord | None: ...
     async def add_event(self, run_id: str, type: str, data: dict[str, Any]) -> RunEvent: ...
@@ -122,6 +137,7 @@ class MemoryRunStore:
         self.events: dict[str, list[RunEvent]] = {}
         self.artifacts: dict[tuple[str, str], tuple[bytes, str, datetime]] = {}
         self._lock = asyncio.Lock()
+        self._admission = asyncio.Lock()
 
     async def setup(self) -> None:
         return None
@@ -150,6 +166,53 @@ class MemoryRunStore:
 
     async def count_active(self, tenant: str) -> int:
         return sum(1 for r in self.runs.values() if r.tenant == tenant and r.status in ACTIVE)
+
+    def _leasable(self, run: RunRecord, owner: str) -> bool:
+        live = run.lease_until is not None and run.lease_until >= utcnow()
+        return run.status in ACTIVE and (run.owner in (None, owner) or not live)
+
+    async def claim(self, run_id: str, owner: str, lease_s: float) -> RunRecord | None:
+        async with self._lock:
+            run = self.runs.get(run_id)
+            if run is None or not self._leasable(run, owner):
+                return None
+            until = utcnow() + timedelta(seconds=lease_s)
+            self.runs[run_id] = run.model_copy(update={"owner": owner, "lease_until": until})
+            return self.runs[run_id].model_copy()
+
+    async def renew(self, owner: str, run_ids: Sequence[str], lease_s: float) -> list[str]:
+        kept = []
+        until = utcnow() + timedelta(seconds=lease_s)
+        for run_id in run_ids:
+            run = self.runs.get(run_id)
+            if run is not None and run.owner == owner and run.status in ACTIVE:
+                self.runs[run_id] = run.model_copy(update={"lease_until": until})
+                kept.append(run_id)
+        return kept
+
+    async def release(self, run_id: str, owner: str) -> None:
+        run = self.runs.get(run_id)
+        if run is not None and run.owner == owner:
+            self.runs[run_id] = run.model_copy(update={"owner": None, "lease_until": None})
+
+    async def orphaned(self, also_owner: str | None = None) -> list[RunRecord]:
+        now = utcnow()
+        return [
+            r.model_copy()
+            for r in self.runs.values()
+            if r.status in ACTIVE
+            and (
+                r.owner is None
+                or r.lease_until is None
+                or r.lease_until < now
+                or (also_owner is not None and r.owner == also_owner)
+            )
+        ]
+
+    @asynccontextmanager
+    async def admission(self) -> AsyncIterator[None]:
+        async with self._admission:
+            yield
 
     async def usage(self, since: datetime, tenant: str | None = None) -> Usage:
         runs = [
@@ -250,10 +313,12 @@ CREATE TABLE IF NOT EXISTS bu_runs (
 ALTER TABLE bu_runs ADD COLUMN IF NOT EXISTS budget_usd double precision NOT NULL DEFAULT 0;
 ALTER TABLE bu_runs ADD COLUMN IF NOT EXISTS cost_breakdown jsonb NOT NULL DEFAULT '{}';
 ALTER TABLE bu_runs ADD COLUMN IF NOT EXISTS purged_at timestamptz;
+ALTER TABLE bu_runs ADD COLUMN IF NOT EXISTS owner text;
+ALTER TABLE bu_runs ADD COLUMN IF NOT EXISTS lease_until timestamptz;
+ALTER TABLE bu_runs ADD COLUMN IF NOT EXISTS command jsonb;
 CREATE INDEX IF NOT EXISTS bu_runs_tenant_created ON bu_runs (tenant, created_at DESC);
 CREATE INDEX IF NOT EXISTS bu_runs_created ON bu_runs (created_at);
 CREATE INDEX IF NOT EXISTS bu_runs_finished ON bu_runs (finished_at);
-CREATE INDEX IF NOT EXISTS bu_artifacts_created ON bu_artifacts (created_at);
 CREATE INDEX IF NOT EXISTS bu_runs_status ON bu_runs (status);
 CREATE TABLE IF NOT EXISTS bu_run_events (
     run_id     text NOT NULL REFERENCES bu_runs (id) ON DELETE CASCADE,
@@ -271,13 +336,36 @@ CREATE TABLE IF NOT EXISTS bu_artifacts (
     created_at   timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (run_id, kind)
 );
+CREATE INDEX IF NOT EXISTS bu_artifacts_created ON bu_artifacts (created_at);
 """
 
 _RUN_COLUMNS = list(RunRecord.model_fields)
+ADMISSION_LOCK = 0x62755F61646D  # "bu_adm"
 
 
 def _adapt(value: Any) -> Any:
     return Jsonb(value) if isinstance(value, dict | list) else value
+
+
+@asynccontextmanager
+async def advisory_lock(conn: Any, key: int, poll_s: float = 0.2) -> AsyncIterator[None]:
+    """Hold a Postgres session-level advisory lock on ``conn``.
+
+    Waits by polling ``pg_try_advisory_lock`` rather than blocking in ``pg_advisory_lock``: a
+    blocked call is an open statement, and ``CREATE INDEX CONCURRENTLY`` (LangGraph's schema
+    setup) waits for every open statement — while the lock holder waits for that index. Two
+    replicas starting together deadlocked exactly like that.
+    """
+    while True:
+        cur = await conn.execute("SELECT pg_try_advisory_lock(%s) AS ok", [key])
+        row = await cur.fetchone()
+        if row and row["ok"]:
+            break
+        await asyncio.sleep(poll_s)
+    try:
+        yield
+    finally:
+        await conn.execute("SELECT pg_advisory_unlock(%s)", [key])
 
 
 class PostgresRunStore:
@@ -329,6 +417,55 @@ class PostgresRunStore:
 
     async def runs_with_status(self, statuses: Sequence[str]) -> list[RunRecord]:
         return await self._fetch_runs(sql.SQL("status = ANY(%s)"), [list(statuses)])
+
+    async def claim(self, run_id: str, owner: str, lease_s: float) -> RunRecord | None:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                UPDATE bu_runs SET owner = %s, lease_until = now() + make_interval(secs => %s)
+                WHERE id = %s AND status = ANY(%s)
+                  AND (owner IS NULL OR owner = %s OR lease_until IS NULL OR lease_until < now())
+                RETURNING *
+                """,
+                [owner, lease_s, run_id, list(ACTIVE), owner],
+            )
+            row = await cur.fetchone()
+        return RunRecord.model_validate(row) if row else None
+
+    async def renew(self, owner: str, run_ids: Sequence[str], lease_s: float) -> list[str]:
+        if not run_ids:
+            return []
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE bu_runs SET lease_until = now() + make_interval(secs => %s)"
+                " WHERE owner = %s AND id = ANY(%s) AND status = ANY(%s) RETURNING id",
+                [lease_s, owner, list(run_ids), list(ACTIVE)],
+            )
+            rows = await cur.fetchall()
+        return [str(r["id"]) for r in rows]
+
+    async def release(self, run_id: str, owner: str) -> None:
+        async with self.pool.connection() as conn:
+            await conn.execute(
+                "UPDATE bu_runs SET owner = NULL, lease_until = NULL WHERE id = %s AND owner = %s",
+                [run_id, owner],
+            )
+
+    async def orphaned(self, also_owner: str | None = None) -> list[RunRecord]:
+        """Active runs with no live lease (plus those of ``also_owner``)."""
+        return await self._fetch_runs(
+            sql.SQL(
+                "status = ANY(%s) AND (owner IS NULL OR lease_until IS NULL"
+                " OR lease_until < now() OR owner = %s)"
+            ),
+            [list(ACTIVE), also_owner or ""],
+        )
+
+    @asynccontextmanager
+    async def admission(self) -> AsyncIterator[None]:
+        """Serialise run admission across replicas (caps and limits are check-then-insert)."""
+        async with self.pool.connection() as conn, advisory_lock(conn, ADMISSION_LOCK):
+            yield
 
     async def count_active(self, tenant: str) -> int:
         async with self.pool.connection() as conn:

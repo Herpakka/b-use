@@ -11,6 +11,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from browser.actions import Click
 from bu_client import Client, Event, parse_sse
+from core.bus import LocalBus
 from core.store import MemoryRunStore
 from tests.agent_fakes import PLAN, FakeBrowser, tool
 from tests.api_support import (
@@ -268,7 +269,7 @@ def test_running_run_recovers_after_restart() -> None:
     store, saver = MemoryRunStore(), InMemorySaver()
     browser = FakeBrowser(SHOP)
     slow = memory_factory(browser, [PLAN, DONE], store=store, saver=saver, llm_delay=1.0)
-    with client_for(slow) as client:
+    with client_for(slow, drain_timeout_s=0) as client:  # a hard stop, no draining
         run = start_run(client)
         # plan takes 1 s; leave once it is done and the next LLM call is in flight
         wait_for(client, run["id"], lambda r: "observe" in event_types(client, r["id"]))
@@ -340,3 +341,21 @@ def test_password_text_is_masked_in_events() -> None:
         events = client.get(f"/v1/runs/{run['id']}/events", headers=AUTH_A).text
     assert "hunter2-secret" not in events
     assert "tomsmith" in events  # only password fields are masked
+
+
+class NoBus(LocalBus):
+    """Redis down: subscribing fails, publishing is lost."""
+
+    def subscribe(self, channel: str) -> Any:
+        raise ConnectionError("redis is down")
+
+    async def publish(self, channel: str, message: str) -> None:
+        return None
+
+
+def test_sse_works_without_the_bus() -> None:
+    factory = memory_factory(FakeBrowser(SHOP), [PLAN, DONE], bus=NoBus(), llm_delay=0.3)
+    with live_server(factory) as url, Client(url, KEY_A) as sdk:
+        run = sdk.create_run("task", ["shop.test"], start_url=HOME)
+        types = [e.type for e in sdk.stream(run["id"])]
+    assert types[-1] == "finished" and "decision" in types  # streamed by polling the store

@@ -18,6 +18,8 @@ services:
       BU_DATABASE_URL: postgresql://bu:bu@postgres:5432/bu
       BU_REDIS_URL: redis://redis:6379/0
       BU_SESSIONS_DIR: /data/sessions
+      # .env points Langfuse at localhost for the host; from a container it is the host's port.
+      LANGFUSE_HOST: http://host.docker.internal:7453
       # Bind mounts from Windows don't deliver inotify events.
       WATCHFILES_FORCE_POLLING: "true"
       # Keep the container's .pyc files out of the shared checkout.

@@ -78,6 +78,9 @@ class RunOut(BaseModel):
     pending: dict[str, Any] | None = Field(
         description="What the agent is waiting for while status is needs_human."
     )
+    owner: str | None = Field(
+        default=None, description="Replica currently responsible for the run (operations)."
+    )
     created_at: datetime
     updated_at: datetime
     finished_at: datetime | None

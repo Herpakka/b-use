@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  # Every replica of the "app" service, found through Docker's DNS.
+  - job_name: browser-agent
+    dns_sd_configs:
+      - names: ["app"]
+        type: A
+        port: 8000
+        refresh_interval: 15s

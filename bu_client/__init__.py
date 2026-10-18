@@ -155,6 +155,23 @@ class Client:
                 if event.type == "finished":
                     return
 
+    # ------------------------------------------------------------------ secrets, usage
+    def put_secret(self, name: str, value: str, domains: list[str] | None = None) -> None:
+        """Store a credential; use it in a task as ``{{SECRET:<name>}}``."""
+        self._request("PUT", f"/v1/secrets/{name}", json={"value": value, "domains": domains or []})
+
+    def list_secrets(self) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = self._request("GET", "/v1/secrets").json()
+        return result
+
+    def delete_secret(self, name: str) -> None:
+        self._request("DELETE", f"/v1/secrets/{name}")
+
+    def usage(self) -> dict[str, Any]:
+        """This month's spend and what is left under the caps."""
+        result: dict[str, Any] = self._request("GET", "/v1/usage").json()
+        return result
+
     def wait(
         self,
         run_id: str,

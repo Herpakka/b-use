@@ -39,6 +39,11 @@ class EventBus(Protocol):
     async def close(self) -> None: ...
 
 
+def replica_channel(replica: str) -> str:
+    """Commands for one replica (resume/cancel of runs it owns)."""
+    return f"bu:replica:{replica}"
+
+
 def run_channel(run_id: str) -> str:
     return f"bu:run:{run_id}"
 

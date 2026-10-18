@@ -22,6 +22,8 @@ dependencies = [
     "httpx>=0.28",
     "cryptography>=46",
     "psutil>=7.2",
+    "langfuse>=3",
+    "prometheus-client>=0.21",
 ]
 
 [project.scripts]
@@ -89,6 +91,7 @@ markers = [
     "llm: calls the real OpenAI API",
     "pg: needs a reachable Postgres (BU_DATABASE_URL)",
     "redis: needs a reachable Redis (BU_REDIS_URL)",
+    "langfuse: needs a reachable Langfuse and its keys (LANGFUSE_*)",
 ]
 
 # ---------------------------------------------------------------- layer rules

@@ -61,6 +61,7 @@ def memory_factory(
     llm_delay: float = 0.0,
     with_llm: bool = True,
     secrets: MemorySecretStore | None = None,
+    bus: LocalBus | None = None,
 ) -> ServicesFactory:
     run_store = store or MemoryRunStore()
     secret_store = secrets or MemorySecretStore()
@@ -68,7 +69,7 @@ def memory_factory(
 
     @asynccontextmanager
     async def factory(settings: Settings) -> AsyncIterator[Services]:
-        bus = LocalBus()
+        event_bus = bus or LocalBus()
         ctx = (
             AgentContext(
                 browser=browser,
@@ -83,19 +84,19 @@ def memory_factory(
         )
         manager = RunManager(
             store=run_store,
-            bus=bus,
+            bus=event_bus,
             browser=browser,
             graph=compile_graph(checkpoints),
             ctx=ctx,
             settings=settings,
             secrets=secret_store,
         )
-        await manager.recover()
+        await manager.start()
         try:
             yield Services(
                 settings=settings,
                 store=run_store,
-                bus=bus,
+                bus=event_bus,
                 limiter=LocalRateLimiter(),
                 browser=browser,
                 manager=manager,

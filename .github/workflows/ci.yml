@@ -20,9 +20,15 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U bu -d bu"
           --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
     env:
       UV_PYTHON_DOWNLOADS: never
       BU_DATABASE_URL: postgresql://bu:bu@postgres:5432/bu
+      BU_REDIS_URL: redis://redis:6379/0
       BU_SESSIONS_DIR: /tmp/bu-sessions
     steps:
       - uses: actions/checkout@v4
@@ -39,3 +45,25 @@ jobs:
         run: uv run mypy
       - name: test
         run: uv run pytest -m "not live and not llm"
+
+  # 5.5: the production image builds and stays under 1.5 GB.
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.prod
+          tags: browser-use:prod
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: size < 1.5 GB
+        run: |
+          bytes=$(docker image inspect browser-use:prod --format '{{.Size}}')
+          echo "image size: $((bytes / 1000000)) MB" | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$bytes" -lt 1500000000
+      - name: the app imports and its Chromium starts
+        run: docker run --rm --shm-size=2g --entrypoint python browser-use:prod -m devtools.image_check

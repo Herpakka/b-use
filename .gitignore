@@ -10,3 +10,6 @@ build/
 *.egg-info/
 evals/reports/
 .data/
+
+# HAR recordings for evals (--har record): ~15 MB for the 30 tasks; commit them deliberately if wanted
+evals/har/

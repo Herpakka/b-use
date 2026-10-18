@@ -273,3 +273,32 @@ async def test_session_is_held_only_while_the_human_decides() -> None:
     final, _, _ = await run_task(ctx, on_human=approve)
     assert held_during == [{final["session_id"]}]
     assert browser.held == set()
+
+
+async def test_a_failing_screenshot_does_not_end_the_run() -> None:
+    class NoScreenshots(FakeBrowser):
+        async def screenshot(self, session_id: str) -> bytes:
+            raise TimeoutError("Page.screenshot: Timeout 5000ms exceeded")
+
+    browser = NoScreenshots(SHOP)
+    ctx = make_ctx(browser, [PLAN, tool("Done", result="fine without it")])
+    graph_final, _, _ = await run_task_vision(ctx)
+    assert graph_final["status"] == "done"
+
+
+async def run_task_vision(ctx: Any) -> Any:
+    from langgraph.checkpoint.memory import InMemorySaver as Saver
+
+    from agent.graph import compile_graph
+    from agent.runner import initial_state, limits_from
+
+    state = initial_state(
+        ctx,
+        task="t",
+        allowed_domains=["shop.test"],
+        start_url=HOME,
+        vision=True,
+        limits=limits_from(ctx.settings),
+    )
+    final, pending = await drive(compile_graph(Saver()), ctx, state["run_id"], state, max_steps=5)
+    return final, pending, None

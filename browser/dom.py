@@ -104,14 +104,21 @@ EXTRACT_JS = (
     const p = el.parentElement || (root && root.host);
     return !(p && getComputedStyle(p).cursor === "pointer");
   };
+  // Text runs are merged into one line for compactness, but never across a block boundary
+  // (heading, paragraph, list item, row …): the model needs to tell "the first paragraph" apart.
+  const BLOCKS = new Set(["p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "dt", "dd", "tr",
+    "blockquote", "pre", "figcaption", "caption", "section", "article", "header", "footer",
+    "aside", "nav", "main", "form", "fieldset", "legend", "table", "ul", "ol", "dl", "br", "hr"]);
+  let lineBreak = false;
   const pushText = (t) => {
     if (textBudget <= 0) return;
     t = clip(t, Math.min(400, textBudget));
     if (!t) return;
     textBudget -= t.length;
     const last = items[items.length - 1];
-    if (last && last[0] === "t" && last[1].length + t.length < 400) last[1] += " " + t;
+    if (!lineBreak && last && last[0] === "t" && last[1].length + t.length < 400) last[1] += " " + t;
     else items.push(["t", t]);
+    lineBreak = false;
   };
   // display:contents boxes report as invisible although their children render.
   const isContents = (el) => getComputedStyle(el).display === "contents";
@@ -226,8 +233,11 @@ EXTRACT_JS = (
       }
     }
     if (!interactive && !inside) annotate(el, tag);
+    const block = BLOCKS.has(tag);
+    if (block) lineBreak = true;
     const kids = el.shadowRoot ? el.shadowRoot.childNodes : el.childNodes;
     for (const c of kids) walk(c, inside || interactive);
+    if (block) lineBreak = true;
   };
   walk(document.body || document.documentElement, false);
   const se = document.scrollingElement || document.documentElement;

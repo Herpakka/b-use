@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from langchain_core.language_models import BaseChatModel
 
@@ -12,6 +13,9 @@ from browser.service import BrowserService
 from core.config import Settings
 from core.costs import PriceTable
 from core.secrets import SecretResolver
+
+if TYPE_CHECKING:
+    from agent.tracing import Tracer
 
 
 @dataclass(frozen=True)
@@ -24,3 +28,4 @@ class AgentContext:
     clock: Callable[[], float] = field(default=time.time)
     # Looks up {{SECRET:name}} values; None = runs cannot use secrets.
     secrets: SecretResolver | None = None
+    tracer: Tracer | None = None  # Langfuse; None = no tracing

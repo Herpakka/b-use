@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import secrets
 import sys
@@ -215,3 +216,81 @@ async def test_postgres_retention_queries(pg_store: PostgresRunStore) -> None:
     assert await pg_store.get_run(f"run-{tag}2") is None
     assert await pg_store.events_after(f"run-{tag}2") == []  # cascaded
     assert await pg_store.get_run(f"run-{tag}1") is not None
+
+
+@pytest.mark.pg
+async def test_postgres_leases_and_admission_lock(pg_store: PostgresRunStore) -> None:
+    run_id = f"run-lease{secrets.token_hex(4)}"
+    await pg_store.create_run(
+        RunRecord(
+            id=run_id,
+            tenant="lease",
+            task="t",
+            allowed_domains=["a.test"],
+            session_id="lease.s",
+            max_steps=5,
+            status="running",
+        )
+    )
+    assert run_id in {r.id for r in await pg_store.orphaned()}  # nobody owns it yet
+    claimed = await pg_store.claim(run_id, "a", 30)
+    assert claimed is not None and claimed.owner == "a"
+    assert await pg_store.claim(run_id, "b", 30) is None  # a's lease is live
+    assert run_id not in {r.id for r in await pg_store.orphaned()}
+    assert run_id in {r.id for r in await pg_store.orphaned(also_owner="a")}
+    assert await pg_store.renew("a", [run_id], 0.2) == [run_id]
+    assert await pg_store.renew("b", [run_id], 30) == []
+    await asyncio.sleep(0.3)
+    assert (await pg_store.claim(run_id, "b", 30)) is not None  # expired: b adopts
+    await pg_store.release(run_id, "a")  # not a's any more: no effect
+    assert (await pg_store.get_run(run_id)).owner == "b"  # type: ignore[union-attr]
+    await pg_store.release(run_id, "b")
+    assert (await pg_store.get_run(run_id)).owner is None  # type: ignore[union-attr]
+
+    order: list[str] = []
+
+    async def admit(name: str, hold: float) -> None:
+        async with pg_store.admission():
+            order.append(f"{name}+")
+            await asyncio.sleep(hold)
+            order.append(f"{name}-")
+
+    await asyncio.gather(admit("x", 0.3), admit("y", 0.0))
+    assert order in (["x+", "x-", "y+", "y-"], ["y+", "y-", "x+", "x-"])
+    await pg_store.update_run(run_id, status="done")
+
+
+@pytest.mark.pg
+async def test_schema_setup_works_on_an_empty_database(pg_store: PostgresRunStore) -> None:
+    """Every fresh deployment runs this; the dev database never shows ordering mistakes."""
+    schema = f"fresh_{secrets.token_hex(4)}"
+    url = os.environ["BU_DATABASE_URL"]
+    async with pg_store.pool.connection() as conn:
+        await conn.execute(f'CREATE SCHEMA "{schema}"')
+    pool: AsyncConnectionPool[Any] = AsyncConnectionPool(
+        url,
+        open=False,
+        kwargs={
+            "autocommit": True,
+            "prepare_threshold": 0,
+            "row_factory": dict_row,
+            "options": f"-c search_path={schema}",
+        },
+    )
+    await pool.open(wait=True, timeout=5)
+    try:
+        fresh = PostgresRunStore(pool)
+        await fresh.setup()
+        await fresh.setup()  # and again, as every replica restart does
+        await PostgresSecretStore(pool, None).setup()
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT count(*) AS n FROM information_schema.tables WHERE table_schema = %s",
+                [schema],
+            )
+            row = await cur.fetchone()
+        assert row is not None and row["n"] == 4  # runs, events, artifacts, secrets
+    finally:
+        await pool.close()
+        async with pg_store.pool.connection() as conn:
+            await conn.execute(f'DROP SCHEMA "{schema}" CASCADE')

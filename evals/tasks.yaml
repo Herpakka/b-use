@@ -1,0 +1,111 @@
+# Nightly suite (phase 5.1): the 15 smoke tasks plus 15 more. Expected answers were checked
+# against the live sites on 2026-10-18. Same fields as smoke.yaml, plus:
+#   secrets: {name: {value, domains}} — available to the task as {{SECRET:name}}
+# Targets (plan §5): success ≥ 70 % (v1; MVP ≥ 55 %), cost ≤ $0.15 per task, median ≤ 9 steps.
+
+include: [smoke.yaml]
+
+tasks:
+  - id: books-travel-cheapest
+    task: In the Travel category, which book is the cheapest, and what does it cost?
+    allowed_domains: [books.toscrape.com]
+    start_url: https://books.toscrape.com/
+    expect: {contains: ["Road to Little Dribbling", "23.21"]}
+
+  - id: books-page3-first
+    task: What is the title of the first book on page 3 of the catalogue?
+    allowed_domains: [books.toscrape.com]
+    start_url: https://books.toscrape.com/
+    expect: {contains: ["Slow States of Collapse"]}
+
+  - id: books-mystery-count
+    task: How many books are in the Mystery category?
+    allowed_domains: [books.toscrape.com]
+    start_url: https://books.toscrape.com/
+    expect: {regex: '\b32\b'}
+
+  - id: quotes-tag-love
+    task: Open the quotes tagged "love". Who wrote the first quote listed?
+    allowed_domains: [quotes.toscrape.com]
+    start_url: https://quotes.toscrape.com/
+    expect: {contains: ["Gide"]}
+
+  - id: quotes-login
+    task: >-
+      Log in on quotes.toscrape.com with the username "demo" and the password "demo" (the
+      site accepts any), then report what link now appears where "Login" used to be.
+    allowed_domains: [quotes.toscrape.com]
+    start_url: https://quotes.toscrape.com/login
+    expect: {contains: ["Logout"]}
+
+  - id: quotes-js
+    task: >-
+      The page quotes.toscrape.com/js/ builds its quotes with JavaScript. Who wrote the first
+      quote on it?
+    allowed_domains: [quotes.toscrape.com]
+    start_url: https://quotes.toscrape.com/js/
+    expect: {contains: ["Einstein"]}
+
+  - id: internet-tables
+    task: In "Example 1" on the data tables page, what is the e-mail address of Tim Conway?
+    allowed_domains: [the-internet.herokuapp.com]
+    start_url: https://the-internet.herokuapp.com/tables
+    expect: {contains: ["tconway@earthlink.net"]}
+
+  - id: internet-add-remove
+    task: >-
+      On the Add/Remove Elements page, click "Add Element" two times, then report how many
+      "Delete" buttons are on the page.
+    allowed_domains: [the-internet.herokuapp.com]
+    start_url: https://the-internet.herokuapp.com/add_remove_elements/
+    expect: {regex: '(?i)\b(2|two)\b'}
+
+  - id: internet-shadow
+    # The text sits in slots of custom elements with open shadow roots.
+    task: On the Shadow DOM page, what sentence is shown right below the "Simple template" heading?
+    allowed_domains: [the-internet.herokuapp.com]
+    start_url: https://the-internet.herokuapp.com/shadowdom
+    expect: {contains: ["different text"]}
+
+  - id: internet-status-404
+    task: On the Status Codes page, open the 404 example and report the sentence it shows.
+    allowed_domains: [the-internet.herokuapp.com]
+    start_url: https://the-internet.herokuapp.com/status_codes
+    expect: {contains: ["returned a 404 status code"]}
+
+  - id: internet-login-secret
+    task: >-
+      Log in on the login page with the username "tomsmith" and the password
+      {{SECRET:internet_pw}}, then report the message shown after login.
+    allowed_domains: [the-internet.herokuapp.com]
+    start_url: https://the-internet.herokuapp.com/login
+    # The site's public demo password; the agent only ever sees the placeholder.
+    secrets:
+      internet_pw: {value: "SuperSecretPassword!", domains: [the-internet.herokuapp.com]}
+    expect: {contains: ["secure area"]}
+
+  - id: scrape-capital
+    task: On scrapethissite.com's list of countries, what is the capital of Andorra?
+    allowed_domains: [www.scrapethissite.com, scrapethissite.com]
+    start_url: https://www.scrapethissite.com/pages/simple/
+    expect: {contains: ["Andorra la Vella"]}
+
+  - id: scrape-hockey-wins
+    task: >-
+      On scrapethissite.com's hockey teams page, search for "Boston Bruins". How many games
+      did they win in 1990?
+    allowed_domains: [www.scrapethissite.com, scrapethissite.com]
+    start_url: https://www.scrapethissite.com/pages/forms/
+    expect: {regex: '\b44\b'}
+
+  - id: wiki-everest
+    task: According to its English Wikipedia article, how high is Mount Everest in metres?
+    allowed_domains: [en.wikipedia.org]
+    start_url: https://en.wikipedia.org/wiki/Mount_Everest
+    expect: {regex: '8,?84[89]'}
+
+  - id: pydocs-split-maxsplit
+    task: In the official Python 3 documentation, what is the default value of maxsplit in str.split()?
+    allowed_domains: [docs.python.org]
+    start_url: https://docs.python.org/3/library/stdtypes.html
+    expect: {regex: '(?<!\d)-1\b'}

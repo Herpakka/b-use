@@ -4,10 +4,10 @@ Natural-language task → an LLM (OpenAI, orchestrated with LangGraph) drives a 
 (Playwright) until the task is done, pausing for a human on logins, captchas and irreversible
 actions.
 
-Status: **phase 4 (hardening) done** — secret placeholders, a context-aware approval policy,
-monthly spend caps, Chromium crash recovery, PII redaction and retention, and an adversarial
-suite, on top of the API (M3), the agent and the browser layer (M2). Phase 5 (eval at scale,
-observability, deploy) is next.
+Status: **phase 5 (M4)** — runs on several replicas (leases, failover, graceful drain), a
+1.4 GB production image, a staging stack with two replicas behind Caddy plus Prometheus and
+Grafana, Langfuse tracing, a 30-task nightly eval with HAR replay, and a runbook — on top of
+hardening (phase 4), the API (M3), the agent and the browser layer (M2).
 
 Smoke eval on 2026-10-18 (`gpt-4.1` / `gpt-4.1-mini`, prompts `system@3`): 15/15 passed,
 median 3 steps, mean $0.018 per task, p95 22 s. Adversarial suite: 15/15 scripted attacks held,
@@ -76,8 +76,12 @@ tenants never see each other's runs or browser sessions.
 | `GET`/`DELETE` | `/v1/sessions`, `/v1/sessions/{name}` | open browser sessions |
 | `PUT`/`GET`/`DELETE` | `/v1/secrets/{name}`, `/v1/secrets` | credentials for `{{SECRET:name}}` (values are never returned) |
 | `GET` | `/v1/usage` | this month's spend, and what is left under the caps |
+| `GET` | `/healthz`, `/readyz`, `/metrics` | liveness, readiness (with the reason), Prometheus |
 
 Runs left running by a crashed or restarted server continue from their checkpoint on startup.
+
+Five runnable examples are in [examples/](examples/): ask a question, stream steps, approve
+from the terminal, log in with a stored secret, reuse a session and read usage.
 
 ```python
 from bu_client import Client
@@ -87,6 +91,36 @@ with Client("http://localhost:8000", api_key="…") as client:
     final = client.wait(run["id"], on_event=print, on_human=lambda pending: {"approved": True})
     print(final["result"])
 ```
+
+## Staging: two replicas (production image)
+
+```bash
+docker compose -f docker/compose.staging.yml up -d --build
+uv run python -m devtools.staging_check      # failover, drain, forwarding — real runs, ~5 cents
+```
+
+| | |
+|---|---|
+| <http://localhost:8088> | API and `/debug` through Caddy (sticky cookie for browsers, retries on the other replica) |
+| <http://localhost:3001> | Grafana, dashboard "Browser agent": success rate, p50/p95 duration, cost per run, pool use |
+| <http://localhost:9095> | Prometheus, scraping each replica's `/metrics` |
+
+The image is `docker/Dockerfile.prod`: multi-stage, headless Chromium shell only, `tini` as PID 1,
+non-root, ~1.4 GB (CI fails it above 1.5 GB).
+
+**Several replicas.** Each active run has one owner: the replica holding a live lease on it
+(`BU_RUN_LEASE_S`, 30 s, renewed every 10 s). A resume or cancel that reaches another replica is
+stored on the run and the owner is nudged over Redis — the owner holds the paused browser
+(login window, half-filled form). When a replica dies its leases expire and the others adopt
+its runs from their checkpoints; on SIGTERM it drains (`BU_DRAIN_TIMEOUT_S`, 60 s), then hands
+the rest over at once. Admission (caps, limits) is serialised with a Postgres advisory lock. A
+replica whose browsers are all in use answers 503 with `Retry-After`. Still per replica: the
+live view and `/v1/sessions` show that replica's browsers (the debug page sticks to one).
+
+**Observability.** `/metrics` (Prometheus) per replica; Langfuse tracing when
+`LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` are set — one session per run,
+a span per node, a generation per LLM call with tokens and cost, PII-masked like the logs.
+Operations: [docs/runbook.md](docs/runbook.md).
 
 ## Credentials: `{{SECRET:name}}`
 
@@ -113,8 +147,8 @@ reflect, extract). Monthly caps (`BU_MONTHLY_BUDGET_USD` for the deployment,
 `BU_TENANT_MONTHLY_BUDGET_USD` per tenant, UTC calendar month) are enforced when a run starts:
 active runs count at their full budget, so the cap holds as long as runs stop at their budget
 — which they do, give or take the last LLM call. A run that doesn't fit is cut down to what is
-left, or refused with 402. The caps are checked in one process; several replicas would need a
-shared counter (phase 5).
+left, or refused with 402. Admission is serialised across replicas (a Postgres advisory lock),
+so concurrent requests on different replicas cannot both slip under the cap.
 
 ## Browser health
 
@@ -159,11 +193,17 @@ same pages against the real model (~5 cents):
 docker compose run --rm app uv run pytest tests/adversarial -m "not llm"
 ```
 
-Smoke eval (15 tasks on public practice sites):
+Evals — `evals/smoke.yaml` (15 tasks) and `evals/tasks.yaml` (those plus 15 more: 30, run
+nightly by `.github/workflows/nightly.yml`). Each run writes a JSON report and can append a
+Markdown comparison with the previous one (`--summary-md`, also `python -m evals.report`):
 
 ```bash
-docker compose run --rm app uv run python -m evals.runner evals/smoke.yaml
+docker compose run --rm -e BU_BROWSER_WS_ENDPOINT= app uv run python -m evals.runner evals/tasks.yaml --min-rate 0.7
 ```
+
+`--har record` saves every task's traffic to `evals/har/<task>.har.zip`; `--har replay` serves it
+back (falling through to the network for pages the recording lacks; `replay-strict` refuses
+them), so a failing task means the agent changed, not the website.
 
 Lint/type-check also works on the Windows host: `uv sync` then `uv run lint`.
 

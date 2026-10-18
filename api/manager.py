@@ -2,14 +2,22 @@
 
 Lifecycle: queued → running → (needs_human ⇄ running)* → done | failed | cancelled.
 A run paused for a human holds no task; ``resume`` starts a new one from the checkpoint.
-On startup, runs left ``queued``/``running`` by a dead process continue from their checkpoint.
+
+Several replicas share the store. Each active run has one owner, the replica holding a live
+lease on it (``BU_RUN_LEASE_S``, renewed every third of that): it runs the run, or keeps its
+paused browser session. A resume or cancel that reaches another replica is stored on the run as
+a ``command`` and the owner is nudged over the bus. When an owner dies its leases run out and
+any replica adopts the runs, continuing them from their checkpoints (and carrying out a waiting
+command). On shutdown a replica drains, then gives its leases up so the others take over at once.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-from datetime import datetime
+import json
+import socket
+from datetime import datetime, timedelta
 from functools import partial
 from typing import Any
 
@@ -19,9 +27,10 @@ from agent.context import AgentContext
 from agent.graph import AgentGraph
 from agent.nodes.finalize import own_session
 from agent.runner import drive, initial_state, limits_from, new_run_id
+from api import metrics
 from api.schemas import CreateRunRequest, ResumeRequest, session_id
 from browser.service import BrowserService, SessionNotFoundError
-from core.bus import EventBus, run_channel
+from core.bus import EventBus, replica_channel, run_channel
 from core.config import Settings
 from core.logging import bind_context, get_logger
 from core.redact import redact
@@ -33,6 +42,8 @@ log = get_logger("api.manager")
 FINISHED = "finished"
 # A run with less than this to spend can't make a single useful decision.
 MIN_RUN_BUDGET_USD = 0.01
+# How long a cancel forwarded to another replica is waited for before answering.
+FORWARD_WAIT_S = 10.0
 
 
 def month_start(now: datetime | None = None) -> datetime:
@@ -41,10 +52,11 @@ def month_start(now: datetime | None = None) -> datetime:
 
 
 class RunError(Exception):
-    def __init__(self, status: int, detail: str) -> None:
+    def __init__(self, status: int, detail: str, *, retry_after: int | None = None) -> None:
         super().__init__(detail)
         self.status = status
         self.detail = detail
+        self.retry_after = retry_after
 
 
 MASK = "••••"
@@ -131,14 +143,17 @@ class RunManager:
         self.ctx = ctx
         self.settings = settings
         self.secrets = secrets
+        self.replica = settings.replica_id or socket.gethostname()
+        self.draining = False
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._sessions: dict[str, str] = {}  # run id → browser session id, while a task runs
+        self._owned: set[str] = set()  # runs this replica holds a lease on (running or paused)
         self._cost: dict[str, float] = {}
         self._elements: dict[str, dict[str, Any]] = {}  # latest observation per run
         self._cancelling: set[str] = set()
+        self._handed_over: set[str] = set()  # lease lost: another replica runs it now
         self._breakdown: dict[str, dict[str, float]] = {}
-        # Checking the monthly caps and recording the run's reservation must not interleave.
-        self._admission = asyncio.Lock()
+        self._loops: list[asyncio.Task[None]] = []
 
     # ------------------------------------------------------------------ queries
     def is_running(self, run_id: str) -> bool:
@@ -147,15 +162,65 @@ class RunManager:
     def session_busy(self, sid: str) -> bool:
         return sid in self._sessions.values()
 
+    @property
+    def running(self) -> int:
+        return len(self._tasks)
+
+    @property
+    def owned(self) -> int:
+        return len(self._owned)
+
+    @property
+    def lease_s(self) -> float:
+        return self.settings.run_lease_s
+
+    # ------------------------------------------------------------------ lifecycle
+    async def start(self) -> None:
+        """Adopt runs nobody owns, then keep leases fresh and listen for forwarded commands."""
+        await self.recover()
+        self._loops = [
+            asyncio.create_task(self._lease_loop(), name="run-leases"),
+            asyncio.create_task(self._command_loop(), name="run-commands"),
+        ]
+
+    async def shutdown(self) -> None:
+        """Graceful stop: refuse new runs, let running ones finish (up to ``drain_timeout_s``),
+        then stop the rest — they stay ``running`` — and give every lease up, so another
+        replica continues them from their checkpoints right away."""
+        self.draining = True
+        tasks = list(self._tasks.values())
+        if tasks:
+            log.info("draining", runs=len(tasks), timeout_s=self.settings.drain_timeout_s)
+            _, pending = await asyncio.wait(tasks, timeout=self.settings.drain_timeout_s)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        for loop in self._loops:
+            loop.cancel()
+        await asyncio.gather(*self._loops, return_exceptions=True)
+        for run_id in list(self._owned):
+            with contextlib.suppress(Exception):
+                await self.store.release(run_id, self.replica)
+        if self._owned:
+            log.info("leases_released", runs=len(self._owned))
+        self._owned.clear()
+
     # ------------------------------------------------------------------ commands
     async def create(self, tenant: str, req: CreateRunRequest) -> RunRecord:
+        if self.draining:
+            raise RunError(503, "this server is shutting down; retry")
         if self.ctx is None:
             raise RunError(503, "the OpenAI key is not configured (BU_OPENAI_API_KEY)")
         if req.budget_usd is not None and req.budget_usd > self.settings.max_budget_usd:
             raise RunError(422, f"budget_usd may not exceed {self.settings.max_budget_usd}")
         await self._check_secrets(tenant, req.task)
-        async with self._admission:
-            return await self._admit(tenant, req)
+        # Caps and limits are check-then-insert: one admission at a time, across replicas.
+        try:
+            async with self.store.admission():
+                return await self._admit(tenant, req)
+        except RunError as err:
+            metrics.RUNS_REFUSED.labels(str(err.status)).inc()
+            raise
 
     async def remaining_budget(self, tenant: str) -> float | None:
         """USD a new run of ``tenant`` may still commit this month (None: no cap applies)."""
@@ -169,6 +234,13 @@ class RunManager:
 
     async def _admit(self, tenant: str, req: CreateRunRequest) -> RunRecord:
         assert self.ctx is not None
+        # Every run (and every run paused for a human) holds a browser context on its replica.
+        # A full replica says so at once, instead of failing the run 30 s later.
+        browser = await self.browser.health()
+        if browser.max_sessions and max(browser.sessions, self.owned) >= browser.max_sessions:
+            raise RunError(
+                503, f"all {browser.max_sessions} browsers of this replica are busy", retry_after=5
+            )
         active = await self.store.count_active(tenant)
         if active >= self.settings.max_active_runs_per_tenant:
             raise RunError(429, f"{active} runs are already active for this tenant")
@@ -208,8 +280,12 @@ class RunManager:
             max_steps=limits["max_steps"],
             budget_usd=limits["budget_usd"],
             prompt_version=state["prompt_version"],
+            owner=self.replica,
+            lease_until=utcnow() + timedelta(seconds=self.lease_s),
         )
         await self.store.create_run(run)
+        metrics.RUNS_STARTED.inc()
+        self._owned.add(run_id)
         await self.emit(
             run_id,
             "created",
@@ -224,7 +300,14 @@ class RunManager:
             raise RunError(409, f"run is {run.status}, not waiting for a human")
         if self.is_running(run_id):
             raise RunError(409, "run is already resuming")
-        self._start(run, Command(resume=req.model_dump()))
+        payload = req.model_dump()
+        metrics.HUMAN_ANSWERS.labels(str(req.approved).lower()).inc()
+        if await self._take(run.id):
+            self._start(run, Command(resume=payload))
+        else:
+            # Its browser session (login window, half-filled form) lives on the owner: let the
+            # owner resume it. If the owner is gone, whoever adopts the run finds the command.
+            await self._forward(run, {"resume": payload})
         await self.emit(run_id, "resumed", {"approved": req.approved, "answer": req.answer[:200]})
         return run
 
@@ -232,43 +315,129 @@ class RunManager:
         run = await self._get(tenant, run_id)
         if run.status in TERMINAL:
             raise RunError(409, f"run is already {run.status}")
-        if task := self._tasks.get(run_id):
-            self._cancelling.add(run_id)
+        if run_id in self._owned or await self._take(run.id):
+            return await self._cancel_here(run)
+        await self._forward(run, {"cancel": True})
+        deadline = asyncio.get_running_loop().time() + FORWARD_WAIT_S
+        while asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.1)
+            latest = await self.store.get_run(run_id)
+            if latest is not None and latest.status in TERMINAL:
+                return latest
+        return await self._get(tenant, run_id)  # the owner (or its successor) will finish it
+
+    async def recover(self) -> None:
+        """Adopt runs whose owner is gone (no live lease) and continue them from their
+        checkpoints. Runs at startup and then every lease interval, on every replica."""
+        if self.ctx is None:
+            return
+        # Our own runs too, when this replica restarted (same id) and its leases are live.
+        for orphan in await self.store.orphaned(also_owner=self.replica):
+            if self.draining or orphan.id in self._owned:
+                continue
+            run = await self.store.claim(orphan.id, self.replica, self.lease_s)
+            if run is None:
+                continue  # another replica was quicker
+            self._owned.add(run.id)
+            if orphan.owner not in (None, self.replica):
+                metrics.RUNS_ADOPTED.inc()
+            await self._adopt(run)
+
+    # ------------------------------------------------------------------ ownership internals
+    async def _take(self, run_id: str) -> bool:
+        if run_id in self._owned:
+            return True
+        if await self.store.claim(run_id, self.replica, self.lease_s) is None:
+            return False
+        self._owned.add(run_id)
+        return True
+
+    async def _forward(self, run: RunRecord, command: dict[str, Any]) -> None:
+        await self.store.update_run(run.id, command=command)
+        if run.owner:
+            await self.bus.publish(replica_channel(run.owner), json.dumps({"run_id": run.id}))
+        log.info("command_forwarded", run_id=run.id, owner=run.owner, op=next(iter(command)))
+
+    async def _adopt(self, run: RunRecord) -> None:
+        snapshot = await self.graph.aget_state({"configurable": {"thread_id": run.id}})
+        if not snapshot.values:
+            await self._finish(
+                run.id, status="failed", failure_reason="lost before it started (restart)"
+            )
+        elif snapshot.interrupts:
+            if run.status != "needs_human":
+                pending = snapshot.interrupts[0].value
+                await self.store.update_run(run.id, status="needs_human", pending=pending)
+            await self._apply_command(run.id)
+        elif not snapshot.next:
+            await self._finish_from_state(run.id, dict(snapshot.values))
+        elif run.command and run.command.get("cancel"):
+            await self._apply_command(run.id)
+        else:
+            log.info("run_recovered", run_id=run.id, at=list(snapshot.next))
+            await self.emit(run.id, "recovered", {"at": list(snapshot.next), "by": self.replica})
+            self._start(run, None)
+
+    async def _apply_command(self, run_id: str) -> None:
+        """Carry out a resume/cancel another replica forwarded to us."""
+        run = await self.store.get_run(run_id)
+        if run is None or not run.command or run_id not in self._owned:
+            return
+        command = run.command
+        await self.store.update_run(run_id, command=None)
+        if command.get("cancel"):
+            await self._cancel_here(run)
+        elif "resume" in command and run.status == "needs_human" and not self.is_running(run_id):
+            self._start(run, Command(resume=command["resume"]))
+
+    async def _cancel_here(self, run: RunRecord) -> RunRecord:
+        if task := self._tasks.get(run.id):
+            self._cancelling.add(run.id)
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
-            self._cancelling.discard(run_id)
+            self._cancelling.discard(run.id)
         await self._release_session(run)
         return await self._finish(
-            run_id, status="cancelled", failure_reason="cancelled by the client"
+            run.id, status="cancelled", failure_reason="cancelled by the client"
         )
 
-    async def recover(self) -> None:
-        """Continue runs a dead process left behind, from their last checkpoint."""
-        if self.ctx is None:
-            return
-        for run in await self.store.runs_with_status(("queued", "running")):
-            snapshot = await self.graph.aget_state({"configurable": {"thread_id": run.id}})
-            if not snapshot.values:
-                await self._finish(
-                    run.id, status="failed", failure_reason="lost before it started (restart)"
-                )
-            elif snapshot.interrupts:
-                pending = snapshot.interrupts[0].value
-                await self.store.update_run(run.id, status="needs_human", pending=pending)
-            elif not snapshot.next:
-                await self._finish_from_state(run.id, dict(snapshot.values))
-            else:
-                log.info("run_recovered", run_id=run.id, at=list(snapshot.next))
-                await self.emit(run.id, "recovered", {"at": list(snapshot.next)})
-                self._start(run, None)
+    async def _lease_loop(self) -> None:
+        interval = self.lease_s / 3
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self._tend_leases()
+            except Exception as err:  # ownership upkeep must never die
+                log.error("lease_upkeep_failed", error=str(err)[:200])
 
-    async def shutdown(self) -> None:
-        """Stop tasks without marking runs: they are ``running`` and resume on next start."""
-        tasks = list(self._tasks.values())
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+    async def _tend_leases(self) -> None:
+        owned = sorted(self._owned)
+        kept = set(await self.store.renew(self.replica, owned, self.lease_s))
+        for run_id in set(owned) - kept:
+            self._owned.discard(run_id)
+            if task := self._tasks.get(run_id):
+                # Our lease ran out (we stalled) and someone else adopted the run: stop ours.
+                log.warning("lease_lost", run_id=run_id)
+                self._handed_over.add(run_id)
+                task.cancel()
+        for run_id in kept:
+            await self._apply_command(run_id)  # in case the nudge was missed
+        await self.recover()
+
+    async def _command_loop(self) -> None:
+        while True:
+            try:
+                async with self.bus.subscribe(replica_channel(self.replica)) as sub:
+                    while True:
+                        message = await sub.get(1.0)
+                        if message:
+                            await self._apply_command(str(json.loads(message)["run_id"]))
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                log.warning("command_listener_failed", error=str(err)[:200])
+                await asyncio.sleep(1.0)
 
     # ------------------------------------------------------------------ internals
     async def _check_secrets(self, tenant: str, task: str) -> None:
@@ -324,11 +493,16 @@ class RunManager:
                 payload,
                 max_steps=run.max_steps,
                 on_event=partial(self._on_event, run),
+                trace_user=run.tenant,
+                trace_tags=["api", self.settings.env],
             )
         except asyncio.CancelledError:
             if run.id in self._cancelling:
                 return  # cancel() records the outcome
-            raise  # shutdown: stays "running" and resumes on the next start
+            if run.id in self._handed_over:
+                self._handed_over.discard(run.id)
+                return  # another replica owns it now
+            raise  # shutdown: stays "running"; the lease is released and another replica adopts
         except Exception as err:
             log.exception("run_crashed")
             await self._release_session(run)
@@ -342,6 +516,7 @@ class RunManager:
             await self.store.update_run(
                 run.id, status="needs_human", pending=pending, **self._totals(final)
             )
+            metrics.HUMAN_REQUESTS.labels(str(pending.get("kind", "approval"))).inc()
             await self.emit(run.id, "needs_human", pending)
             return
         await self._finish_from_state(run.id, final)
@@ -415,6 +590,16 @@ class RunManager:
         self._cost.pop(run_id, None)
         self._elements.pop(run_id, None)
         self._breakdown.pop(run_id, None)
-        run = await self.store.update_run(run_id, pending=None, finished_at=utcnow(), **fields)
+        run = await self.store.update_run(
+            run_id,
+            pending=None,
+            finished_at=utcnow(),
+            owner=None,
+            lease_until=None,
+            command=None,
+            **fields,
+        )
+        self._owned.discard(run_id)
         assert run is not None
+        metrics.run_finished(run)
         return run
