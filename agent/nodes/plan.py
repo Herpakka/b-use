@@ -34,5 +34,7 @@ async def plan_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[s
         subgoals = [state["task"]]
     return {
         "plan": subgoals,
-        **usage_update(ctx, ctx.settings.model_decide, call.tokens_in, call.tokens_out),
+        **usage_update(
+            ctx, ctx.settings.model_decide, call.tokens_in, call.tokens_out, node="plan"
+        ),
     }

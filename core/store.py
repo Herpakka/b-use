@@ -37,7 +37,9 @@ class RunRecord(BaseModel):
     result: str | None = None
     failure_reason: str | None = None
     steps: int = 0
+    budget_usd: float = 0.0  # the run's own cap, reserved against monthly budgets
     cost_usd: float = 0.0
+    cost_breakdown: dict[str, float] = Field(default_factory=dict)
     tokens_in: int = 0
     tokens_out: int = 0
     pending: dict[str, Any] | None = None  # the interrupt payload while needs_human
@@ -45,6 +47,7 @@ class RunRecord(BaseModel):
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     finished_at: datetime | None = None
+    purged_at: datetime | None = None  # when its agent checkpoints were deleted
 
 
 class RunEvent(BaseModel):
@@ -62,21 +65,38 @@ UPDATABLE = frozenset(
         "failure_reason",
         "steps",
         "cost_usd",
+        "cost_breakdown",
         "tokens_in",
         "tokens_out",
         "pending",
         "finished_at",
+        "purged_at",
     }
 )
 
 
+class Usage(BaseModel):
+    runs: int = 0
+    cost_usd: float = 0.0
+    # Spent by finished runs + the full budget of active ones: what a new run must fit beside.
+    committed_usd: float = 0.0
+    tokens_in: int = 0
+    tokens_out: int = 0
+
+
+def committed(run: RunRecord) -> float:
+    return max(run.budget_usd, run.cost_usd) if run.status in ACTIVE else run.cost_usd
+
+
 class RunStore(Protocol):
     async def setup(self) -> None: ...
+    async def ping(self) -> None: ...
     async def create_run(self, run: RunRecord) -> None: ...
     async def get_run(self, run_id: str, tenant: str | None = None) -> RunRecord | None: ...
     async def list_runs(self, tenant: str, limit: int = 50) -> list[RunRecord]: ...
     async def runs_with_status(self, statuses: Sequence[str]) -> list[RunRecord]: ...
     async def count_active(self, tenant: str) -> int: ...
+    async def usage(self, since: datetime, tenant: str | None = None) -> Usage: ...
     async def update_run(self, run_id: str, **fields: Any) -> RunRecord | None: ...
     async def add_event(self, run_id: str, type: str, data: dict[str, Any]) -> RunEvent: ...
     async def events_after(self, run_id: str, seq: int = 0) -> list[RunEvent]: ...
@@ -84,6 +104,10 @@ class RunStore(Protocol):
         self, run_id: str, kind: str, content: bytes, content_type: str
     ) -> None: ...
     async def get_artifact(self, run_id: str, kind: str) -> tuple[bytes, str] | None: ...
+    # retention (api.janitor)
+    async def delete_artifacts_before(self, cutoff: datetime) -> int: ...
+    async def runs_to_purge(self, finished_before: datetime, limit: int) -> list[str]: ...
+    async def delete_runs_before(self, finished_before: datetime) -> int: ...
 
 
 def _check_fields(fields: dict[str, Any]) -> None:
@@ -96,10 +120,13 @@ class MemoryRunStore:
     def __init__(self) -> None:
         self.runs: dict[str, RunRecord] = {}
         self.events: dict[str, list[RunEvent]] = {}
-        self.artifacts: dict[tuple[str, str], tuple[bytes, str]] = {}
+        self.artifacts: dict[tuple[str, str], tuple[bytes, str, datetime]] = {}
         self._lock = asyncio.Lock()
 
     async def setup(self) -> None:
+        return None
+
+    async def ping(self) -> None:
         return None
 
     async def create_run(self, run: RunRecord) -> None:
@@ -124,6 +151,20 @@ class MemoryRunStore:
     async def count_active(self, tenant: str) -> int:
         return sum(1 for r in self.runs.values() if r.tenant == tenant and r.status in ACTIVE)
 
+    async def usage(self, since: datetime, tenant: str | None = None) -> Usage:
+        runs = [
+            r
+            for r in self.runs.values()
+            if r.created_at >= since and (tenant is None or r.tenant == tenant)
+        ]
+        return Usage(
+            runs=len(runs),
+            cost_usd=sum(r.cost_usd for r in runs),
+            committed_usd=sum(committed(r) for r in runs),
+            tokens_in=sum(r.tokens_in for r in runs),
+            tokens_out=sum(r.tokens_out for r in runs),
+        )
+
     async def update_run(self, run_id: str, **fields: Any) -> RunRecord | None:
         _check_fields(fields)
         run = self.runs.get(run_id)
@@ -146,10 +187,42 @@ class MemoryRunStore:
     async def save_artifact(
         self, run_id: str, kind: str, content: bytes, content_type: str
     ) -> None:
-        self.artifacts[(run_id, kind)] = (content, content_type)
+        self.artifacts[(run_id, kind)] = (content, content_type, utcnow())
 
     async def get_artifact(self, run_id: str, kind: str) -> tuple[bytes, str] | None:
-        return self.artifacts.get((run_id, kind))
+        found = self.artifacts.get((run_id, kind))
+        return (found[0], found[1]) if found else None
+
+    async def delete_artifacts_before(self, cutoff: datetime) -> int:
+        old = [key for key, (_, _, at) in self.artifacts.items() if at < cutoff]
+        for key in old:
+            del self.artifacts[key]
+        return len(old)
+
+    async def runs_to_purge(self, finished_before: datetime, limit: int) -> list[str]:
+        return [
+            r.id
+            for r in self.runs.values()
+            if r.status in TERMINAL
+            and r.finished_at is not None
+            and r.finished_at < finished_before
+            and r.purged_at is None
+        ][:limit]
+
+    async def delete_runs_before(self, finished_before: datetime) -> int:
+        old = [
+            r.id
+            for r in self.runs.values()
+            if r.status in TERMINAL
+            and r.finished_at is not None
+            and r.finished_at < finished_before
+        ]
+        for run_id in old:
+            del self.runs[run_id]
+            self.events.pop(run_id, None)
+            for key in [k for k in self.artifacts if k[0] == run_id]:
+                del self.artifacts[key]
+        return len(old)
 
 
 _SCHEMA = """
@@ -174,7 +247,13 @@ CREATE TABLE IF NOT EXISTS bu_runs (
     updated_at      timestamptz NOT NULL DEFAULT now(),
     finished_at     timestamptz
 );
+ALTER TABLE bu_runs ADD COLUMN IF NOT EXISTS budget_usd double precision NOT NULL DEFAULT 0;
+ALTER TABLE bu_runs ADD COLUMN IF NOT EXISTS cost_breakdown jsonb NOT NULL DEFAULT '{}';
+ALTER TABLE bu_runs ADD COLUMN IF NOT EXISTS purged_at timestamptz;
 CREATE INDEX IF NOT EXISTS bu_runs_tenant_created ON bu_runs (tenant, created_at DESC);
+CREATE INDEX IF NOT EXISTS bu_runs_created ON bu_runs (created_at);
+CREATE INDEX IF NOT EXISTS bu_runs_finished ON bu_runs (finished_at);
+CREATE INDEX IF NOT EXISTS bu_artifacts_created ON bu_artifacts (created_at);
 CREATE INDEX IF NOT EXISTS bu_runs_status ON bu_runs (status);
 CREATE TABLE IF NOT EXISTS bu_run_events (
     run_id     text NOT NULL REFERENCES bu_runs (id) ON DELETE CASCADE,
@@ -218,6 +297,10 @@ class PostgresRunStore:
             for statement in filter(None, (part.strip() for part in _SCHEMA.split(";"))):
                 await conn.execute(statement)
 
+    async def ping(self) -> None:
+        async with self.pool.connection(timeout=3) as conn:
+            await conn.execute("SELECT 1")
+
     async def create_run(self, run: RunRecord) -> None:
         data = run.model_dump()
         query = sql.SQL("INSERT INTO bu_runs ({}) VALUES ({})").format(
@@ -255,6 +338,28 @@ class PostgresRunStore:
             )
             row = await cur.fetchone()
         return int(row["n"]) if row else 0
+
+    async def usage(self, since: datetime, tenant: str | None = None) -> Usage:
+        where: sql.Composable = sql.SQL("created_at >= %s")
+        params: list[Any] = [since]
+        if tenant is not None:
+            where = sql.SQL("{} AND tenant = %s").format(where)
+            params.append(tenant)
+        query = sql.SQL(
+            """
+            SELECT count(*) AS runs,
+                   COALESCE(sum(cost_usd), 0) AS cost_usd,
+                   COALESCE(sum(CASE WHEN status = ANY(%s) THEN GREATEST(budget_usd, cost_usd)
+                                     ELSE cost_usd END), 0) AS committed_usd,
+                   COALESCE(sum(tokens_in), 0) AS tokens_in,
+                   COALESCE(sum(tokens_out), 0) AS tokens_out
+            FROM bu_runs WHERE {}
+            """
+        ).format(where)
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(query, [list(ACTIVE), *params])
+            row = await cur.fetchone()
+        return Usage.model_validate(row or {})
 
     async def update_run(self, run_id: str, **fields: Any) -> RunRecord | None:
         _check_fields(fields)
@@ -310,6 +415,30 @@ class PostgresRunStore:
                 """,
                 [run_id, kind, content, content_type],
             )
+
+    async def delete_artifacts_before(self, cutoff: datetime) -> int:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute("DELETE FROM bu_artifacts WHERE created_at < %s", [cutoff])
+            return int(cur.rowcount)
+
+    async def runs_to_purge(self, finished_before: datetime, limit: int) -> list[str]:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT id FROM bu_runs WHERE status = ANY(%s) AND finished_at < %s"
+                " AND purged_at IS NULL ORDER BY finished_at LIMIT %s",
+                [list(TERMINAL), finished_before, limit],
+            )
+            rows = await cur.fetchall()
+        return [str(row["id"]) for row in rows]
+
+    async def delete_runs_before(self, finished_before: datetime) -> int:
+        # Events and artifacts go with their run (ON DELETE CASCADE).
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "DELETE FROM bu_runs WHERE status = ANY(%s) AND finished_at < %s",
+                [list(TERMINAL), finished_before],
+            )
+            return int(cur.rowcount)
 
     async def get_artifact(self, run_id: str, kind: str) -> tuple[bytes, str] | None:
         async with self.pool.connection() as conn:

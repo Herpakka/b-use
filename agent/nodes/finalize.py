@@ -36,7 +36,15 @@ async def finalize_node(state: AgentState, runtime: Runtime[AgentContext]) -> di
             reason = f"stuck after {MAX_REFLECTIONS_IN_ROW} reflections in a row"
         update.update(status="failed", failure_reason=reason or "stopped")
 
-    # Closing persists cookies/storage for the next run that reuses this session id.
+    sid = state["session_id"]
     with contextlib.suppress(Exception):
-        await ctx.browser.close(state["session_id"])
+        if own_session(sid, state["run_id"]):
+            await ctx.browser.forget(sid)  # nobody can reuse it: don't keep its cookies
+        else:
+            await ctx.browser.close(sid)  # saved for the next run under this session name
     return update
+
+
+def own_session(session_id: str, run_id: str) -> bool:
+    """True for a run's own unnamed session (``run-…``, or ``<tenant>.run-…`` in the API)."""
+    return session_id == run_id or session_id.endswith("." + run_id)

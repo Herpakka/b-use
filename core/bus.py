@@ -32,6 +32,10 @@ class EventBus(Protocol):
         """Subscribed by the time the context is entered — replay after entering, not before."""
         ...
 
+    async def ping(self) -> None:
+        """Raise if the bus is unreachable."""
+        ...
+
     async def close(self) -> None: ...
 
 
@@ -69,6 +73,9 @@ class LocalBus:
             self._subs[channel].discard(sub)
             if not self._subs[channel]:
                 del self._subs[channel]
+
+    async def ping(self) -> None:
+        return None
 
     async def close(self) -> None:
         self._subs.clear()
@@ -112,6 +119,9 @@ class RedisBus:
             with contextlib.suppress(aioredis.RedisError):
                 await pubsub.unsubscribe(channel)
             await pubsub.aclose()  # type: ignore[no-untyped-call]
+
+    async def ping(self) -> None:
+        await self.redis.ping()
 
     async def close(self) -> None:
         await self.redis.aclose()

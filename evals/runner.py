@@ -31,6 +31,7 @@ from browser.local import local_browser
 from core.config import Settings, get_settings
 from core.costs import PriceTable
 from core.logging import configure_logging
+from core.secrets import StaticSecretStore
 
 
 class Expect(BaseModel):
@@ -116,6 +117,7 @@ async def run_suite(
             llm_small=make_chat_model(settings, settings.model_small),
             settings=settings,
             prices=prices,
+            secrets=StaticSecretStore(settings.local_secrets).get,
         )
         graph = compile_graph(saver)
         for t in tasks:
@@ -192,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     settings = get_settings()
-    configure_logging("WARNING", json=False)
+    configure_logging("WARNING", json=False, redact=settings.redact_pii)
     if settings.openai_api_key is None:
         print("BU_OPENAI_API_KEY is not set (put it in .env)", file=sys.stderr)
         return 2

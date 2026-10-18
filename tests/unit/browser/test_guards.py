@@ -79,3 +79,36 @@ def test_host_reason_ignores_public_names_and_ips() -> None:
 def test_ip_reason_unwraps_ipv4_mapped() -> None:
     assert ip_reason(ipaddress.ip_address("::ffff:127.0.0.1")) is not None
     assert ip_reason(ipaddress.ip_address("8.8.8.8")) is None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/out?url=https://evil.net/?d=secret",
+        "https://example.com/out?url=https%3A%2F%2Fevil.net%2F",
+        "https://example.com/out?u=https%253A%252F%252Fevil.net",  # encoded twice
+        "https://example.com/out?next=//evil.net/x",
+        "https://example.com/out?next=/%5Cevil.net",  # "/\evil.net" = "//evil.net"
+        "https://example.com/out?next=///evil.net",
+        "https://example.com/r#https://evil.net/",
+        "https://example.com/out?to=http://169.254.169.254/latest/",
+        "https://example.com/out?to=http://www.example.com@evil.net/",
+    ],
+)
+def test_urls_embedding_outside_links_are_refused(url: str) -> None:
+    reason = navigation_reason(url, ALLOWED)
+    assert reason is not None and "embeds a link to" in reason
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/login?next=/account",
+        "https://example.com/login?return=https://www.example.com/cart",
+        "https://example.com/r?u=https://books.toscrape.com/",
+        "https://example.com/app#/settings/profile",
+        "https://example.com/search?q=what+is+https",
+    ],
+)
+def test_urls_embedding_allowed_links_pass(url: str) -> None:
+    assert navigation_reason(url, ALLOWED) is None

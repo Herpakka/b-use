@@ -23,6 +23,7 @@ from browser.local import local_browser
 from core.config import Settings, get_settings
 from core.costs import PriceTable
 from core.logging import bind_context, configure_logging
+from core.secrets import StaticSecretStore
 
 
 def _print(text: str = "") -> None:
@@ -92,6 +93,7 @@ async def _main(args: argparse.Namespace, settings: Settings) -> int:
             llm_small=make_chat_model(settings, settings.model_small),
             settings=settings,
             prices=prices,
+            secrets=StaticSecretStore(settings.local_secrets).get,
         )
         async with open_checkpointer(settings, memory=args.memory) as saver:
             graph = compile_graph(saver)
@@ -173,7 +175,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     settings = get_settings()
-    configure_logging("DEBUG" if args.verbose else "WARNING", json=False)
+    configure_logging(
+        "DEBUG" if args.verbose else "WARNING", json=False, redact=settings.redact_pii
+    )
     if settings.openai_api_key is None:
         print("BU_OPENAI_API_KEY is not set (put it in .env)", file=sys.stderr)
         return 2

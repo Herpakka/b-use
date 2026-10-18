@@ -38,7 +38,9 @@ async def decide_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict
     try:
         call = await call_tool(ctx.llm_decide, messages, ACTION_TOOL_SPECS)
         pending = PendingTool(name=call.name, args=call.args)
-        usage = usage_update(ctx, ctx.settings.model_decide, call.tokens_in, call.tokens_out)
+        usage = usage_update(
+            ctx, ctx.settings.model_decide, call.tokens_in, call.tokens_out, node="decide"
+        )
     except NoToolCallError as err:
         # `act` turns this into an error step, so a model that keeps refusing still hits limits.
         pending = PendingTool(name="(no tool call)", args={"reply": str(err)})
@@ -53,6 +55,6 @@ async def decide_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict
     }
     if pending["name"] == "AskHuman":
         update.update(status="needs_human", pending_reason="the agent asked for help")
-    elif reason := approval_reason(pending, state["elements"]):
+    elif reason := approval_reason(pending, state["elements"], state["current_url"]):
         update.update(status="needs_human", pending_reason=reason)
     return update

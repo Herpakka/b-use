@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from api.deps import validate_api_keys
-from api.routes import debug, health, runs, sessions
+from api.routes import debug, health, runs, secrets, sessions, usage
 from api.services import ServicesFactory, build_services
 from core.config import Settings, get_settings
 from core.logging import configure_logging, get_logger
@@ -18,7 +18,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         s = settings or get_settings()
-        configure_logging(s.log_level, json=s.log_json)
+        configure_logging(s.log_level, json=s.log_json, redact=s.redact_pii)
         validate_api_keys(s)
         log = get_logger("api")
         async with services_factory(s) as services:
@@ -36,6 +36,8 @@ def create_app(
     app.include_router(health.router)
     app.include_router(runs.router)
     app.include_router(sessions.router)
+    app.include_router(secrets.router)
+    app.include_router(usage.router)
     app.include_router(debug.router)
     return app
 

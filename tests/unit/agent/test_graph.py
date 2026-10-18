@@ -38,15 +38,16 @@ async def test_happy_path() -> None:
     assert final["step"] == 2
     assert final["history"] == ['1. click [1] "Kettles" → ok', "2. done → 7 kettles"]
     assert browser.executed == [Navigate(url=HOME), Click(index=1)]
-    assert browser.closed == [final["session_id"]]  # session closed (and persisted) at the end
+    assert browser.forgotten == [final["session_id"]]  # its own session: cookies not kept
     assert final["plan"] == ["open the page", "find the answer"]
     # 3 decide-model calls × (1000 in · $2/M + 50 out · $8/M)
     assert final["cost_usd"] == pytest.approx(3 * (0.002 + 0.0004))
+    assert final["node_costs"] == pytest.approx({"plan": 0.0024, "decide": 2 * 0.0024})
     assert final["tokens_in"] == 3000
 
     first_decision = decide_prompts(ctx)[1]
     assert "# Task\nfind the answer" in first_decision
-    assert "<page_content>\nURL: https://shop.test/" in first_decision
+    assert '">\nURL: https://shop.test/' in first_decision
     assert "[1]<a>Kettles</a>" in first_decision
 
 
@@ -146,7 +147,7 @@ async def test_extract_is_answered_by_the_small_model() -> None:
     assert final["findings"] == ["price (https://shop.test/): ฿1,290"]
     assert final["history"][0] == '1. extract "price" → ฿1,290'
     small_prompt = str(ctx.llm_small.calls[0][-1].content)  # type: ignore[attr-defined]
-    assert "<page_content>\nBlue Kettle — Price: ฿1,290\n</page_content>" in small_prompt
+    assert '">\nBlue Kettle — Price: ฿1,290\n</page_content boundary="' in small_prompt
     # gpt-4.1-mini: 1000 · $0.4/M + 50 · $1.6/M on top of 3 decide calls
     assert final["cost_usd"] == pytest.approx(3 * 0.0024 + 0.0004 + 0.00008)
 

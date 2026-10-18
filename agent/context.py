@@ -11,6 +11,7 @@ from langchain_core.language_models import BaseChatModel
 from browser.service import BrowserService
 from core.config import Settings
 from core.costs import PriceTable
+from core.secrets import SecretResolver
 
 
 @dataclass(frozen=True)
@@ -21,3 +22,5 @@ class AgentContext:
     settings: Settings
     prices: PriceTable
     clock: Callable[[], float] = field(default=time.time)
+    # Looks up {{SECRET:name}} values; None = runs cannot use secrets.
+    secrets: SecretResolver | None = None

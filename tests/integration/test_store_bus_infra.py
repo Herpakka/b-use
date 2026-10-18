@@ -6,14 +6,23 @@ import os
 import secrets
 import sys
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from typing import Any
 
 import pytest
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
+from pydantic import SecretStr
 
 from core.bus import RedisBus
 from core.ratelimit import RedisRateLimiter
+from core.secrets import (
+    PostgresSecretStore,
+    Secret,
+    SecretCipher,
+    SecretsUnavailableError,
+    generate_key,
+)
 from core.store import PostgresRunStore, RunRecord, utcnow
 
 
@@ -117,3 +126,92 @@ async def test_redis_rate_limiter(redis_bus: RedisBus) -> None:
     results = [await limiter.hit(key, 2, 60) for _ in range(3)]
     assert [ok for ok, _ in results] == [True, True, False]
     assert 1 <= results[-1][1] <= 60
+
+
+@pytest.mark.pg
+async def test_postgres_secret_store_encrypts_at_rest(pg_store: PostgresRunStore) -> None:
+    cipher = SecretCipher.from_setting(SecretStr(generate_key()))
+    store = PostgresSecretStore(pg_store.pool, cipher)
+    await store.setup()
+    scope = f"t-{secrets.token_hex(4)}"
+    await store.put(scope, "pw", "correct-horse-battery", ["Shop.Test"])
+    await store.put(scope, "pw", "correct-horse-battery-2", ["shop.test"])  # replaces
+    assert await store.get(scope, "pw") == Secret("pw", "correct-horse-battery-2", ("shop.test",))
+    assert await store.get("other-" + scope, "pw") is None
+    assert [s.name for s in await store.list(scope)] == ["pw"]
+
+    async with pg_store.pool.connection() as conn:
+        cur = await conn.execute("SELECT ciphertext FROM bu_secrets WHERE scope = %s", [scope])
+        row = await cur.fetchone()
+    assert row is not None and b"correct-horse" not in bytes(row["ciphertext"])
+
+    # A different key (e.g. rotated without re-encrypting) reads nothing rather than garbage.
+    other = PostgresSecretStore(pg_store.pool, SecretCipher.from_setting(SecretStr(generate_key())))
+    assert await other.get(scope, "pw") is None
+    with pytest.raises(SecretsUnavailableError):
+        await PostgresSecretStore(pg_store.pool, None).put(scope, "x", "long enough", [])
+    assert await store.delete(scope, "pw")
+
+
+@pytest.mark.pg
+async def test_postgres_usage_counts_active_runs_at_budget(pg_store: PostgresRunStore) -> None:
+    tenant = f"u{secrets.token_hex(4)}"
+    since = utcnow() - timedelta(minutes=1)
+    for i, (status, cost, budget) in enumerate([("done", 0.1, 0.15), ("running", 0.02, 0.15)]):
+        await pg_store.create_run(
+            RunRecord(
+                id=f"run-{tenant}{i}",
+                tenant=tenant,
+                task="t",
+                allowed_domains=["a.test"],
+                session_id=f"{tenant}.s",
+                max_steps=5,
+                status=status,
+                cost_usd=cost,
+                budget_usd=budget,
+                tokens_in=100,
+                cost_breakdown={"decide": cost},
+            )
+        )
+    usage = await pg_store.usage(since, tenant)
+    assert usage.runs == 2 and usage.tokens_in == 200
+    assert usage.cost_usd == pytest.approx(0.12)
+    assert usage.committed_usd == pytest.approx(0.25)
+    assert (await pg_store.usage(utcnow() + timedelta(minutes=1), tenant)).runs == 0
+    run = await pg_store.get_run(f"run-{tenant}0")
+    assert run is not None and run.cost_breakdown == {"decide": 0.1}
+
+
+@pytest.mark.pg
+async def test_postgres_retention_queries(pg_store: PostgresRunStore) -> None:
+    tag = secrets.token_hex(4)
+    now = utcnow()
+    for i, (status, ended) in enumerate([("done", 2.0), ("running", None), ("failed", 40.0)]):
+        run_id = f"run-{tag}{i}"
+        await pg_store.create_run(
+            RunRecord(
+                id=run_id,
+                tenant=f"r{tag}",
+                task="t",
+                allowed_domains=["a.test"],
+                session_id=f"r{tag}.s",
+                max_steps=5,
+                status=status,
+                finished_at=None if ended is None else now - timedelta(days=ended),
+            )
+        )
+        await pg_store.add_event(run_id, "created", {})
+        await pg_store.save_artifact(run_id, "screenshot", b"x", "image/jpeg")
+
+    mine = {f"run-{tag}0", f"run-{tag}2"}
+    to_purge = set(await pg_store.runs_to_purge(now - timedelta(days=1), 10_000))
+    assert to_purge >= mine and f"run-{tag}1" not in to_purge
+    await pg_store.update_run(f"run-{tag}0", purged_at=now)
+    assert f"run-{tag}0" not in await pg_store.runs_to_purge(now - timedelta(days=1), 10_000)
+
+    await pg_store.delete_artifacts_before(now - timedelta(hours=1))
+    assert await pg_store.get_artifact(f"run-{tag}1", "screenshot") is not None  # fresh
+    assert await pg_store.delete_runs_before(now - timedelta(days=30)) >= 1
+    assert await pg_store.get_run(f"run-{tag}2") is None
+    assert await pg_store.events_after(f"run-{tag}2") == []  # cascaded
+    assert await pg_store.get_run(f"run-{tag}1") is not None

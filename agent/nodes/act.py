@@ -14,9 +14,10 @@ from agent.prompts import load
 from agent.routing import is_looping
 from agent.state import AgentState, PendingTool
 from agent.tools import AskHuman, ToolParseError, parse_agent_tool
-from browser.actions import AnyAction, Done, Extract
+from browser.actions import AnyAction, Done, Extract, TypeText
 from browser.models import ActionResult, clip_message, short_url
 from browser.service import SessionNotFoundError
+from core.secrets import Secret, SecretRedactor, secret_names
 
 # A page that changes under every observation would otherwise loop observe→decide→act forever
 # without spending a step.
@@ -40,6 +41,39 @@ def signature(pending: PendingTool, state: AgentState, result: ActionResult) -> 
     )
 
 
+async def resolve_secrets(
+    ctx: AgentContext, state: AgentState, action: AnyAction
+) -> dict[str, Secret] | str:
+    """Values for the placeholders a TypeText uses, or why they can't be had."""
+    names = secret_names(action.text) if isinstance(action, TypeText) else []
+    if not names:
+        return {}
+    if ctx.secrets is None:
+        return "secrets are not configured on this server"
+    found: dict[str, Secret] = {}
+    for name in names:
+        secret = await ctx.secrets(state.get("secret_scope", ""), name)
+        if secret is None:
+            return f"no secret named {name!r} is stored"
+        found[name] = secret
+    return found
+
+
+def _scrub(result: ActionResult, secrets: dict[str, Secret]) -> ActionResult:
+    """Second line of defence: the browser layer already masks typed values."""
+    if not secrets:
+        return result
+    redactor = SecretRedactor()
+    redactor.add(secrets.values())
+    text = result.extracted_text
+    return result.model_copy(
+        update={
+            "message": redactor.scrub(result.message),
+            "extracted_text": None if text is None else redactor.scrub(text),
+        }
+    )
+
+
 async def act_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
     ctx = runtime.context
     pending = state["pending"]
@@ -56,14 +90,22 @@ async def act_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[st
             ok=False, message=clip_message(f"invalid call {pending['name']} → error: {err}")
         )
     else:
-        try:
-            result = await ctx.browser.execute(
-                state["session_id"], action, expected_version=state["dom_version"]
-            )
-        except SessionNotFoundError:
-            result = ActionResult(
-                ok=False, stale=True, message="browser session was restarted — re-observing"
-            )
+        secrets = await resolve_secrets(ctx, state, action)
+        if isinstance(secrets, str):
+            result = ActionResult(ok=False, message=clip_message(f"TypeText → refused: {secrets}"))
+        else:
+            try:
+                result = await ctx.browser.execute(
+                    state["session_id"],
+                    action,
+                    expected_version=state["dom_version"],
+                    secrets=secrets or None,
+                )
+            except SessionNotFoundError:
+                result = ActionResult(
+                    ok=False, stale=True, message="browser session was restarted — re-observing"
+                )
+            result = _scrub(result, secrets)
 
     base: dict[str, Any] = {"pending": None, "human_approved": False}
     if result.stale and state["stale_in_row"] < MAX_STALE_IN_ROW:
@@ -86,7 +128,9 @@ async def act_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[st
                 ),
             ],
         )
-        update.update(usage_update(ctx, ctx.settings.model_small, tokens_in, tokens_out))
+        update.update(
+            usage_update(ctx, ctx.settings.model_small, tokens_in, tokens_out, node="extract")
+        )
         answer = " ".join(answer.split())[:400]
         message = clip_message(f'extract "{action.query}" → {answer}')
         if answer.upper().startswith("NOT FOUND"):

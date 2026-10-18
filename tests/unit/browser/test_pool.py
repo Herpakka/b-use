@@ -80,3 +80,8 @@ async def test_held_sessions_get_the_longer_idle_timeout(pool: BrowserPool) -> N
     assert pool.get("waiting-human") is held
     after_held = held.last_used + pool.settings.held_idle_timeout_s + 1
     assert await pool.reap_idle(now=after_held) == ["waiting-human"]
+
+
+def test_blank_remote_endpoint_means_a_local_browser_with_its_proxy(tmp_path: Path) -> None:
+    pool = BrowserPool(make_settings(tmp_path, browser_ws_endpoint="  ", egress_browser_url=""))
+    assert pool.settings.browser_ws_endpoint is None and pool.egress is not None

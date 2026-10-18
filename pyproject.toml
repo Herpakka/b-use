@@ -20,6 +20,8 @@ dependencies = [
     "redis>=8.1",
     "pyyaml>=6.0",
     "httpx>=0.28",
+    "cryptography>=46",
+    "psutil>=7.2",
 ]
 
 [project.scripts]
@@ -33,7 +35,6 @@ dev = [
     "pytest>=9.1",
     "pytest-asyncio>=1.4",
     "import-linter>=2.15",
-    "psutil>=7.2",
     "types-psutil",
     "types-PyYAML",
 ]

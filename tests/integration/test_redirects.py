@@ -2,7 +2,9 @@
 
 Two local servers stand in for the outside world:
 * ``site``     — a "public" site; ``site.test`` (allowed) and ``outside.test`` (not allowed)
-                 both resolve to it, and its ``/to?url=…`` answers with a real 302.
+                 both resolve to it. ``/go/<n>`` answers with a real 302 to a target kept on the
+                 server, so nothing in the URL gives it away; ``/to?url=…`` is the classic open
+                 redirect with the target in the query string.
 * ``internal`` — an internal service (``internal.test``) that must never receive a request;
                  it counts hits so the test can prove nothing got through.
 The proxy gets a test resolver for these names; everything else uses the real policy.
@@ -14,7 +16,7 @@ import ipaddress
 import secrets
 import threading
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
@@ -38,6 +40,8 @@ class Servers:
     site_port: int
     internal_port: int
     internal_hits: list[str]
+    site_hits: list[str] = field(default_factory=list)
+    redirects: dict[str, str] = field(default_factory=dict)
 
     def site(self, path: str, host: str = "site.test") -> str:
         return f"http://{host}:{self.site_port}{path}"
@@ -46,6 +50,12 @@ class Servers:
         return f"http://internal.test:{self.internal_port}{path}"
 
     def bounce(self, target: str) -> str:
+        """A redirect whose target is invisible in its URL."""
+        key = str(len(self.redirects))
+        self.redirects[key] = target
+        return self.site(f"/go/{key}")
+
+    def open_redirect(self, target: str) -> str:
         return self.site("/to?url=" + quote(target, safe=""))
 
 
@@ -64,7 +74,13 @@ def _site_handler(servers: Servers) -> type[BaseHTTPRequestHandler]:
 
         def do_GET(self) -> None:
             url = urlsplit(self.path)
-            if url.path == "/to":
+            servers.site_hits.append(f"{self.headers.get('Host', '').split(':')[0]}{url.path}")
+            if url.path.startswith("/go/"):
+                self.send_response(302)
+                self.send_header("Location", servers.redirects[url.path.removeprefix("/go/")])
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            elif url.path == "/to":
                 self.send_response(302)
                 self.send_header("Location", parse_qs(url.query)["url"][0])
                 self.send_header("Content-Length", "0")
@@ -160,6 +176,7 @@ async def session(servers: Servers, tmp_path: Path) -> AsyncIterator[BrowserSess
     except Exception as err:
         pytest.skip(f"Chromium unavailable: {err}")
     servers.internal_hits.clear()
+    servers.site_hits.clear()
     s = await pool.open_session(f"r-{secrets.token_hex(3)}", allowed_domains=["site.test"])
     try:
         r = await s.execute(Navigate(url=servers.site("/home")))
@@ -179,6 +196,18 @@ async def test_navigate_redirect_out_of_allowlist_is_undone(
     assert obs.url == servers.site("/home") and obs.title == "Home"
     assert "Evil button" not in [e.name for e in obs.elements]
     assert any("redirected outside the allowed domains" in b for b in obs.blocked)
+
+
+async def test_open_redirect_with_the_target_in_the_url_never_leaves(
+    session: BrowserSession, servers: Servers
+) -> None:
+    target = servers.site("/evil?stolen=data", "outside.test")
+    for url in [servers.open_redirect(target), servers.site("/to?next=/%5Coutside.test/evil")]:
+        servers.site_hits.clear()
+        r = await session.execute(Navigate(url=url))
+        assert not r.ok and "embeds a link to outside.test" in r.message, r.message
+        assert servers.site_hits == []  # refused before the request was sent
+    assert (await session.current_page()).url == servers.site("/home")
 
 
 async def test_click_redirect_out_of_allowlist_is_undone(
@@ -231,6 +260,9 @@ async def test_iframe_redirected_outside_is_not_observed(
     names = [e.name for e in obs.elements]
     assert "Own button" in names
     assert "Framed evil" not in names
+    r = await session.execute(Extract(query="all buttons"))
+    assert r.extracted_text is not None and "Own button" in r.extracted_text
+    assert "Framed evil" not in r.extracted_text
 
 
 async def test_popup_redirected_outside_is_closed(

@@ -119,3 +119,15 @@ async def test_observation_tokens_rotate(session: BrowserSession) -> None:
     page = await session.current_page()
     count = await page.locator(f'[data-bu-idx^="{b.dom_version}-"]').count()
     assert count == len(b.elements)
+
+
+async def test_field_and_form_kinds_for_the_approval_policy(session: BrowserSession) -> None:
+    obs = await goto(session, "checkout.html")
+    by_name = {e.name: e for e in obs.elements}
+    assert (by_name["Card number"].field, by_name["Card number"].form) == ("payment", "payment")
+    assert by_name["Name on card"].field is None and by_name["Name on card"].form == "payment"
+    assert by_name["Continue"].form == "payment"
+    assert by_name["Search"].form == "search" and by_name["Go"].form == "search"
+    assert by_name["Password"].field == "password" and by_name["Sign in"].form == "login"
+    assert by_name["Back to shop"].form is None
+    assert "payment" not in obs.render()  # policy data only; the prompt is unchanged

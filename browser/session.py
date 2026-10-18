@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 
 from playwright.async_api import BrowserContext, Dialog, Page
 from playwright.async_api import Error as PlaywrightError
@@ -17,6 +18,7 @@ from browser.guards import NetworkPolicy, navigation_reason
 from browser.models import ActionResult, Observation, SessionInfo, clip_message, short_url
 from browser.screencast import screencast, take_screenshot
 from core.config import Settings
+from core.secrets import Secret, SecretRedactor
 
 
 class BrowserSession:
@@ -47,12 +49,18 @@ class BrowserSession:
         self._page: Page | None = None
         self._attached: set[Page] = set()
         self._dialogs: list[str] = []
+        self._notices: list[str] = []
+        self._crashed: set[Page] = set()
+        self.saved_at = 0.0  # monotonic time cookies/storage were last written to disk
         self._blocked: list[str] = []  # reported (then cleared) by the next observation
         self._blocked_total = 0  # refused navigations (router or redirect check)
         self._egress_total = 0  # requests the egress proxy refused (any kind)
+        self._egress_seen = 0  # … as of the last observation
         self._last_blocked = ""
         self._last_allowed: dict[Page, str] = {}
         self._first_page: Page | None = None
+        # Values of secrets typed in this session, masked in everything read back from it.
+        self.redactor = SecretRedactor()
 
     async def start(self) -> None:
         self.context.on("page", self._attach)
@@ -65,9 +73,13 @@ class BrowserSession:
         if page not in self._attached:
             self._attached.add(page)
             page.on("dialog", self._on_dialog)
+            page.on("crash", self._on_crash)
             page.set_default_timeout(self.settings.action_timeout_ms)
             page.set_default_navigation_timeout(self.settings.nav_timeout_ms)
         self._page = page
+
+    def _on_crash(self, page: Page) -> None:
+        self._crashed.add(page)
 
     async def _on_dialog(self, dialog: Dialog) -> None:
         self._dialogs.append(clip_message(f"{dialog.type}: {dialog.message}"))
@@ -145,7 +157,23 @@ class BrowserSession:
     def touch(self) -> None:
         self.last_used = time.monotonic()
 
+    async def _reopen_crashed(self, page: Page) -> None:
+        """A renderer crash leaves a dead tab ("Aw, Snap"): replace it with a fresh one on the
+        same (last allowed) URL."""
+        self._crashed.discard(page)
+        url = self._last_allowed.get(page) or page.url
+        with contextlib.suppress(PlaywrightError):
+            await page.close()
+        fresh = await self.context.new_page()
+        self._attach(fresh)
+        if url and url != "about:blank" and self.frame_allowed(url):
+            with contextlib.suppress(PlaywrightError):
+                await fresh.goto(url, wait_until="domcontentloaded")
+        self._notices.append(f"the tab crashed and was reopened at {short_url(url)}")
+
     async def current_page(self) -> Page:
+        if self._page is not None and self._page in self._crashed:
+            await self._reopen_crashed(self._page)
         if self._page is None or self._page.is_closed():
             open_pages = [p for p in self.context.pages if not p.is_closed()]
             self._page = open_pages[-1] if open_pages else await self.context.new_page()
@@ -155,7 +183,10 @@ class BrowserSession:
     async def observe(self, *, screenshot: bool = False) -> Observation:
         async with self.lock:
             self.touch()
-            await self.enforce_allowlist()
+            # Pages navigate by themselves too (meta refresh, scripts): a refusal since the last
+            # look means an error page here is the proxy's doing, not a network failure.
+            await self.enforce_allowlist(egress_refused=self._egress_total > self._egress_seen)
+            self._egress_seen = self._egress_total
             page = await self.current_page()
             obs, refs = await build_observation(
                 page,
@@ -163,20 +194,43 @@ class BrowserSession:
                 max_elements=self.settings.max_elements,
                 frame_allowed=self.frame_allowed,
             )
-            update: dict[str, object] = {"dialogs": self._dialogs, "blocked": self._blocked}
+            update: dict[str, object] = {
+                "dialogs": self._dialogs,
+                "blocked": self._blocked,
+                "notices": self._notices,
+            }
             if screenshot:
                 update["screenshot_b64"] = base64.b64encode(await take_screenshot(page)).decode()
             obs = obs.model_copy(update=update)
-            self._dialogs, self._blocked = [], []
+            if self.redactor:
+                obs = obs.map_text(self.redactor.scrub)
+            self._dialogs, self._blocked, self._notices = [], [], []
             self.refs, self.dom_version, self.last_observation = refs, obs.dom_version, obs
             return obs
 
     async def execute(
-        self, action: AnyAction, *, expected_version: str | None = None
+        self,
+        action: AnyAction,
+        *,
+        expected_version: str | None = None,
+        secrets: Mapping[str, Secret] | None = None,
     ) -> ActionResult:
         async with self.lock:
             self.touch()
-            return await execute_action(self, action, expected_version=expected_version)
+            result = await execute_action(
+                self, action, expected_version=expected_version, secrets=secrets
+            )
+        if not self.redactor:
+            return result
+        scrub = self.redactor.scrub
+        text = result.extracted_text
+        return result.model_copy(
+            update={
+                "message": scrub(result.message),
+                "url": scrub(result.url),
+                "extracted_text": None if text is None else scrub(text),
+            }
+        )
 
     async def screenshot(self) -> bytes:
         async with self.lock:
@@ -187,7 +241,7 @@ class BrowserSession:
         page = self._page
         return SessionInfo(
             id=self.id,
-            url=page.url if page is not None and not page.is_closed() else "",
+            url=self.redactor.scrub(page.url) if page is not None and not page.is_closed() else "",
             tabs=len(self.context.pages),
             idle_s=round(time.monotonic() - self.last_used, 1),
             busy=self.lock.locked(),

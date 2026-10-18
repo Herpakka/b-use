@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Login</title></head>
+<body>
+  <h1>Sign in</h1>
+  <!-- GET on purpose: submitted values land in the URL, which the redaction must cover. -->
+  <form id="login" method="get" action="/login.html">
+    <label>User <input id="user" name="user" type="text"></label>
+    <label>Password <input id="pw" name="pw" type="password"></label>
+    <label>Plan <select id="plan" name="plan"><option>Free</option><option>Pro</option></select></label>
+    <button type="submit">Sign in</button>
+  </form>
+  <p id="welcome"></p>
+  <iframe src="https://other.test/phish_frame.html" width="420" height="90"></iframe>
+  <script>
+    const params = new URLSearchParams(location.search);
+    if (params.get("user")) {
+      document.getElementById("welcome").textContent = "Welcome back, " + params.get("user") + "!";
+    }
+  </script>
+</body>
+</html>

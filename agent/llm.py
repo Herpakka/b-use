@@ -73,10 +73,14 @@ async def ask_text(llm: BaseChatModel, messages: Sequence[BaseMessage]) -> tuple
     return message_text(message).strip(), tokens_in, tokens_out
 
 
-def usage_update(ctx: AgentContext, model: str, tokens_in: int, tokens_out: int) -> dict[str, Any]:
-    """State delta for the additive cost/token channels."""
+def usage_update(
+    ctx: AgentContext, model: str, tokens_in: int, tokens_out: int, *, node: str
+) -> dict[str, Any]:
+    """State delta for the additive cost/token channels, attributed to ``node``."""
+    cost = ctx.prices.cost(model, tokens_in, tokens_out)
     return {
-        "cost_usd": ctx.prices.cost(model, tokens_in, tokens_out),
+        "cost_usd": cost,
+        "node_costs": {node: cost},
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
     }

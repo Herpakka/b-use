@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from datetime import datetime
 from functools import partial
 from typing import Any
 
@@ -16,17 +17,27 @@ from langgraph.types import Command
 
 from agent.context import AgentContext
 from agent.graph import AgentGraph
+from agent.nodes.finalize import own_session
 from agent.runner import drive, initial_state, limits_from, new_run_id
 from api.schemas import CreateRunRequest, ResumeRequest, session_id
 from browser.service import BrowserService, SessionNotFoundError
 from core.bus import EventBus, run_channel
 from core.config import Settings
 from core.logging import bind_context, get_logger
+from core.redact import redact
+from core.secrets import SecretStore, secret_names
 from core.store import ACTIVE, TERMINAL, RunEvent, RunRecord, RunStore, utcnow
 
 log = get_logger("api.manager")
 
 FINISHED = "finished"
+# A run with less than this to spend can't make a single useful decision.
+MIN_RUN_BUDGET_USD = 0.01
+
+
+def month_start(now: datetime | None = None) -> datetime:
+    now = now or utcnow()
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
 class RunError(Exception):
@@ -111,6 +122,7 @@ class RunManager:
         graph: AgentGraph,
         ctx: AgentContext | None,
         settings: Settings,
+        secrets: SecretStore | None = None,
     ) -> None:
         self.store = store
         self.bus = bus
@@ -118,11 +130,15 @@ class RunManager:
         self.graph = graph
         self.ctx = ctx
         self.settings = settings
+        self.secrets = secrets
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._sessions: dict[str, str] = {}  # run id → browser session id, while a task runs
         self._cost: dict[str, float] = {}
         self._elements: dict[str, dict[str, Any]] = {}  # latest observation per run
         self._cancelling: set[str] = set()
+        self._breakdown: dict[str, dict[str, float]] = {}
+        # Checking the monthly caps and recording the run's reservation must not interleave.
+        self._admission = asyncio.Lock()
 
     # ------------------------------------------------------------------ queries
     def is_running(self, run_id: str) -> bool:
@@ -137,9 +153,31 @@ class RunManager:
             raise RunError(503, "the OpenAI key is not configured (BU_OPENAI_API_KEY)")
         if req.budget_usd is not None and req.budget_usd > self.settings.max_budget_usd:
             raise RunError(422, f"budget_usd may not exceed {self.settings.max_budget_usd}")
+        await self._check_secrets(tenant, req.task)
+        async with self._admission:
+            return await self._admit(tenant, req)
+
+    async def remaining_budget(self, tenant: str) -> float | None:
+        """USD a new run of ``tenant`` may still commit this month (None: no cap applies)."""
+        caps: list[float] = []
+        since = month_start()
+        if (cap := self.settings.tenant_monthly_budget_usd) is not None:
+            caps.append(cap - (await self.store.usage(since, tenant)).committed_usd)
+        if (cap := self.settings.monthly_budget_usd) is not None:
+            caps.append(cap - (await self.store.usage(since)).committed_usd)
+        return round(max(0.0, min(caps)), 6) if caps else None
+
+    async def _admit(self, tenant: str, req: CreateRunRequest) -> RunRecord:
+        assert self.ctx is not None
         active = await self.store.count_active(tenant)
         if active >= self.settings.max_active_runs_per_tenant:
             raise RunError(429, f"{active} runs are already active for this tenant")
+        budget = req.budget_usd or self.settings.budget_usd
+        remaining = await self.remaining_budget(tenant)
+        if remaining is not None:
+            if remaining < MIN_RUN_BUDGET_USD:
+                raise RunError(402, f"monthly budget exhausted (${remaining:.2f} left)")
+            budget = min(budget, remaining)  # the run is cut to fit; its record shows by how much
 
         run_id = new_run_id()
         sid = session_id(tenant, req.session or run_id)
@@ -148,7 +186,7 @@ class RunManager:
         ):
             raise RunError(409, f"session {req.session!r} is in use by another active run")
 
-        limits = limits_from(self.settings, max_steps=req.max_steps, budget_usd=req.budget_usd)
+        limits = limits_from(self.settings, max_steps=req.max_steps, budget_usd=budget)
         state = initial_state(
             self.ctx,
             task=req.task,
@@ -158,6 +196,7 @@ class RunManager:
             start_url=req.start_url,
             vision=req.vision,
             limits=limits,
+            secret_scope=tenant,
         )
         run = RunRecord(
             id=run_id,
@@ -167,6 +206,7 @@ class RunManager:
             start_url=req.start_url,
             session_id=sid,
             max_steps=limits["max_steps"],
+            budget_usd=limits["budget_usd"],
             prompt_version=state["prompt_version"],
         )
         await self.store.create_run(run)
@@ -198,8 +238,7 @@ class RunManager:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
             self._cancelling.discard(run_id)
-        with contextlib.suppress(Exception):
-            await self.browser.close(run.session_id)
+        await self._release_session(run)
         return await self._finish(
             run_id, status="cancelled", failure_reason="cancelled by the client"
         )
@@ -232,6 +271,19 @@ class RunManager:
         await asyncio.gather(*tasks, return_exceptions=True)
 
     # ------------------------------------------------------------------ internals
+    async def _check_secrets(self, tenant: str, task: str) -> None:
+        """Fail at creation, not halfway through the run, if a placeholder can't be filled."""
+        names = secret_names(task)
+        if not names:
+            return
+        if self.secrets is None:
+            raise RunError(503, "the task uses secrets but BU_SECRETS_KEY is not configured")
+        for name in names:
+            if await self.secrets.get(tenant, name) is None:
+                raise RunError(
+                    422, f"unknown secret {name!r}: store it with PUT /v1/secrets/{name}"
+                )
+
     async def _get(self, tenant: str, run_id: str) -> RunRecord:
         run = await self.store.get_run(run_id, tenant)
         if run is None:
@@ -251,6 +303,10 @@ class RunManager:
         task.add_done_callback(_done)
 
     async def emit(self, run_id: str, type: str, data: dict[str, Any]) -> RunEvent:
+        """Store and publish an event. Events are a log: PII in them is masked
+        (``BU_REDACT_PII``); the run record keeps the task, result and question as they are."""
+        if self.settings.redact_pii:
+            data = redact(data)
         event = await self.store.add_event(run_id, type, data)
         await self.bus.publish(run_channel(run_id), event.model_dump_json())
         return event
@@ -275,8 +331,7 @@ class RunManager:
             raise  # shutdown: stays "running" and resumes on the next start
         except Exception as err:
             log.exception("run_crashed")
-            with contextlib.suppress(Exception):
-                await self.browser.close(run.session_id)
+            await self._release_session(run)
             await self._finish(
                 run.id,
                 status="failed",
@@ -293,17 +348,31 @@ class RunManager:
 
     async def _on_event(self, run: RunRecord, node: str, update: dict[str, Any]) -> None:
         self._cost[run.id] = self._cost.get(run.id, 0.0) + float(update.get("cost_usd", 0.0))
+        if costs := update.get("node_costs"):
+            known = self._breakdown.setdefault(run.id, dict(run.cost_breakdown))
+            for node_name, cost in costs.items():
+                known[node_name] = known.get(node_name, 0.0) + float(cost)
         if "elements" in update:
             self._elements[run.id] = update["elements"]
         for type_, data in translate(node, update, self._elements.get(run.id)):
             await self.emit(run.id, type_, {**data, "cost_usd": round(self._cost[run.id], 5)})
         if node == "act" and not (update.get("last_result") or {}).get("stale"):
             await self.store.update_run(
-                run.id, steps=int(update.get("step", 0)), cost_usd=self._cost[run.id]
+                run.id,
+                steps=int(update.get("step", 0)),
+                cost_usd=self._cost[run.id],
+                cost_breakdown=self._breakdown.get(run.id, run.cost_breakdown),
             )
             await self._snapshot(run)
         elif node == "decide" and update.get("status") == "needs_human":
             await self._snapshot(run)
+
+    async def _release_session(self, run: RunRecord) -> None:
+        with contextlib.suppress(Exception):
+            if own_session(run.session_id, run.id):
+                await self.browser.forget(run.session_id)
+            else:
+                await self.browser.close(run.session_id)
 
     async def _snapshot(self, run: RunRecord) -> None:
         """Keep the latest screenshot so it can be served after the session is gone."""
@@ -321,6 +390,7 @@ class RunManager:
         return {
             "steps": int(state.get("step", 0)),
             "cost_usd": float(state.get("cost_usd", 0.0)),
+            "cost_breakdown": {k: round(v, 6) for k, v in state.get("node_costs", {}).items()},
             "tokens_in": int(state.get("tokens_in", 0)),
             "tokens_out": int(state.get("tokens_out", 0)),
         }
@@ -344,6 +414,7 @@ class RunManager:
         )
         self._cost.pop(run_id, None)
         self._elements.pop(run_id, None)
+        self._breakdown.pop(run_id, None)
         run = await self.store.update_run(run_id, pending=None, finished_at=utcnow(), **fields)
         assert run is not None
         return run

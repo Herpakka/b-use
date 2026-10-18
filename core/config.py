@@ -6,8 +6,13 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AliasChoices, Field, SecretStr
+from pydantic import AliasChoices, BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class StaticSecret(BaseModel):
+    value: SecretStr
+    domains: list[str] = Field(default_factory=list)
 
 
 class Settings(BaseSettings):
@@ -47,6 +52,28 @@ class Settings(BaseSettings):
     sse_heartbeat_s: float = 15
     debug_page: bool = True
 
+    # --- secrets: {{SECRET:name}} placeholders (core/secrets.py)
+    # 32 random bytes, base64; encrypts tenants' secrets at rest. Unset = the secrets API is off.
+    secrets_key: SecretStr | None = None
+    # For the CLI and evals only — the API keeps per-tenant secrets in Postgres. JSON:
+    # BU_LOCAL_SECRETS={"shop_password": {"value": "…", "domains": ["shop.example"]}}
+    local_secrets: dict[str, StaticSecret] = Field(default_factory=dict)
+
+    # --- spend caps in USD per calendar month (UTC). A run starts only if its whole budget fits
+    # in what is left, counting active runs at their full budget — so the cap is never exceeded
+    # by more than one LLM call per run.
+    monthly_budget_usd: float | None = None  # all tenants together
+    tenant_monthly_budget_usd: float | None = None  # each tenant
+
+    # --- privacy and retention
+    # Mask e-mail addresses, phone/card/national-ID numbers and API keys in logs and run events.
+    redact_pii: bool = True
+    screenshot_ttl_s: float = 86_400
+    # Agent checkpoints hold page snapshots; a finished run no longer needs them.
+    checkpoint_ttl_s: float = 86_400
+    run_retention_days: float | None = None  # then delete the run and its events too
+    janitor_interval_s: float = 3600
+
     # --- browser
     # Drive a browser served elsewhere instead of launching one, e.g. the visible Chromium from
     # `python -m devtools.browser_host`: ws://host.docker.internal:3010/<token>
@@ -68,6 +95,10 @@ class Settings(BaseSettings):
     # Sessions whose run waits for a human (login, captcha, approval) are kept this long.
     held_idle_timeout_s: float = 7200
     reaper_interval_s: float = 60
+    # A browser that stops answering this often/this long is restarted (sessions are restored
+    # by the agent from their cookies and last URL).
+    browser_probe_interval_s: float = 30
+    browser_probe_timeout_s: float = 10
     block_resources: bool = True
     sessions_dir: Path = Path(".data/sessions")
     viewport_width: int = 1280
@@ -88,6 +119,13 @@ class Settings(BaseSettings):
     observation_max_chars: int = 12_000
     history_window: int = 20
     findings_window: int = 8
+
+    @field_validator("browser_ws_endpoint", "egress_browser_url", "secrets_key", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, v: object) -> object:
+        # `BU_BROWSER_WS_ENDPOINT=` must mean "no remote browser" — an empty string would
+        # otherwise select remote mode and leave the browser without its local egress proxy.
+        return None if isinstance(v, str) and not v.strip() else v
 
 
 @lru_cache

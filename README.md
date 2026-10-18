@@ -4,11 +4,14 @@ Natural-language task → an LLM (OpenAI, orchestrated with LangGraph) drives a 
 (Playwright) until the task is done, pausing for a human on logins, captchas and irreversible
 actions.
 
-Status: **M3** — HTTP API with SSE, human-in-the-loop resume, live view, a debug page and a
-Python SDK, on top of the browser layer and agent (M2). Phases 4–5 (hardening, deploy) are next.
+Status: **phase 4 (hardening) done** — secret placeholders, a context-aware approval policy,
+monthly spend caps, Chromium crash recovery, PII redaction and retention, and an adversarial
+suite, on top of the API (M3), the agent and the browser layer (M2). Phase 5 (eval at scale,
+observability, deploy) is next.
 
-Smoke eval on 2026-10-18 (`gpt-4.1` / `gpt-4.1-mini`, prompts `system@2`): 15/15 passed,
-median 3 steps, mean $0.017 per task, p95 17 s. Runs killed mid-task resume with `bu resume`.
+Smoke eval on 2026-10-18 (`gpt-4.1` / `gpt-4.1-mini`, prompts `system@3`): 15/15 passed,
+median 3 steps, mean $0.018 per task, p95 22 s. Adversarial suite: 15/15 scripted attacks held,
+5/5 against the real model. Runs killed mid-task resume with `bu resume`.
 
 ## Layers
 
@@ -27,10 +30,13 @@ Playwright on Windows needs the Proactor event loop while async psycopg needs th
 so the app, tests and CLI run in the Linux container.
 
 ```bash
-cp .env.example .env                 # set BU_OPENAI_API_KEY and BU_API_KEYS
+cp .env.example .env                 # set BU_OPENAI_API_KEY, BU_API_KEYS (and BU_SECRETS_KEY)
 docker compose up -d --build         # app + postgres + redis
-curl localhost:8000/healthz
+curl localhost:8000/readyz           # 200 once database, bus, browser and OpenAI key are OK
 ```
+
+`/healthz` is liveness (the process answers); `/readyz` is readiness (it can serve runs) and
+says which dependency is down.
 
 Open <http://localhost:8000/debug>, paste a key from `BU_API_KEYS`, and start a run: you see each
 step, the browser (screenshot or live view) and Approve/Deny/answer buttons when the agent waits
@@ -68,6 +74,8 @@ tenants never see each other's runs or browser sessions.
 | `GET` | `/v1/runs/{id}/screenshot` | live page, or the last one captured |
 | `WS` | `/v1/runs/{id}/live`, `/v1/sessions/{name}/live` | JPEG frames (browsers: subprotocol `bu.key.<key>`) |
 | `GET`/`DELETE` | `/v1/sessions`, `/v1/sessions/{name}` | open browser sessions |
+| `PUT`/`GET`/`DELETE` | `/v1/secrets/{name}`, `/v1/secrets` | credentials for `{{SECRET:name}}` (values are never returned) |
+| `GET` | `/v1/usage` | this month's spend, and what is left under the caps |
 
 Runs left running by a crashed or restarted server continue from their checkpoint on startup.
 
@@ -79,6 +87,51 @@ with Client("http://localhost:8000", api_key="…") as client:
     final = client.wait(run["id"], on_event=print, on_human=lambda pending: {"approved": True})
     print(final["result"])
 ```
+
+## Credentials: `{{SECRET:name}}`
+
+Never put a password in the task. Store it, then refer to it by name:
+
+```bash
+curl -X PUT localhost:8000/v1/secrets/shop_pw -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" -d '{"value": "…", "domains": ["login.shop.example"]}'
+```
+
+A task like `Sign in with {{SECRET:shop_pw}} and download my last invoice` then works like a
+password manager: the model only ever handles the placeholder; the browser layer types the
+value, refuses any field outside `domains` (a phishing page on another host gets nothing), and
+puts the placeholder back wherever the value shows up again — input values, page text, URLs,
+Extract text. Values are encrypted at rest with `BU_SECRETS_KEY` (AES-GCM, bound to tenant and
+name). The CLI and evals read `BU_LOCAL_SECRETS` instead. Not covered: a value the page
+transforms before showing it (upper-cased, reformatted), and screenshots of non-password fields.
+
+## Costs
+
+Every run has a USD budget (`BU_BUDGET_USD`, or `budget_usd` up to `BU_MAX_BUDGET_USD`) and
+stops when it is used up; `cost_breakdown` on the run shows where it went (plan, decide,
+reflect, extract). Monthly caps (`BU_MONTHLY_BUDGET_USD` for the deployment,
+`BU_TENANT_MONTHLY_BUDGET_USD` per tenant, UTC calendar month) are enforced when a run starts:
+active runs count at their full budget, so the cap holds as long as runs stop at their budget
+— which they do, give or take the last LLM call. A run that doesn't fit is cut down to what is
+left, or refused with 402. The caps are checked in one process; several replicas would need a
+shared counter (phase 5).
+
+## Browser health
+
+A probe asks Chromium for its version every 30 s. A crashed browser is relaunched at once; one
+that stops answering twice in a row (frozen, not dead) is killed and relaunched. A crashed tab
+is reopened on the same URL. Runs carry on: their next step re-opens the session from the
+cookies saved at the last probe and returns to its last URL.
+
+## Privacy and retention
+
+Logs and the event log behind SSE mask e-mail addresses, phone, card and Thai national-ID
+numbers and API keys (`BU_REDACT_PII`); the run record keeps the task, result and the pending
+question as they are, because the client asked for them. Kept for: screenshots 24 h
+(`BU_SCREENSHOT_TTL_S`), agent checkpoints (page snapshots) 24 h after the run ends
+(`BU_CHECKPOINT_TTL_S`), whole runs with their events `BU_RUN_RETENTION_DAYS` (off by default).
+A run's own browser session is deleted with its cookies when it ends; named sessions keep
+theirs. Page content still goes to OpenAI — that is how the agent works.
 
 ## CLI, tests, evals
 
@@ -98,6 +151,14 @@ docker compose run --rm app uv run bu run "What is the price of 'A Light in the 
 docker compose run --rm app uv run bu resume <run_id>
 ```
 
+Adversarial suite (phase 4 exit criteria) — hostile pages on a local fake internet against a
+model that obeys every instruction on the page; the guards must hold anyway. `-m llm` runs the
+same pages against the real model (~5 cents):
+
+```bash
+docker compose run --rm app uv run pytest tests/adversarial -m "not llm"
+```
+
 Smoke eval (15 tasks on public practice sites):
 
 ```bash
@@ -106,28 +167,33 @@ docker compose run --rm app uv run python -m evals.runner evals/smoke.yaml
 
 Lint/type-check also works on the Windows host: `uv sync` then `uv run lint`.
 
-## Guardrails already in place
+## Guardrails
 
-Two layers, because neither can do the whole job alone (Playwright's request router never sees
-the hops of an HTTP redirect, and a proxy cannot tell a page from a subresource):
+Enforced in code, not asked for in the prompt. `tests/adversarial/` attacks each one.
 
 - **Domain allow-list (per run).** The request router refuses navigations — main frame,
-  iframes, popups — to anything outside `allowed_domains`. Redirects are caught after the fact:
-  after every action and before every observation the tab's URL is checked, and a tab that
-  ended up outside the list is sent back to its last allowed page (a popup is closed, an
-  iframe is left out of the observation). The agent never sees or acts on such a page.
+  iframes, popups, form submissions — outside `allowed_domains`, and URLs that carry a link to
+  another host in their query or fragment (the shape of an open redirect). Redirects are
+  caught after the fact: after every action and before every observation the tab's URL is
+  checked, and a tab that ended up outside the list goes back to its last allowed page (a
+  popup is closed; an iframe is left out of the observation and of Extract). Limit: a redirect
+  hidden server-side (`/go/123` → elsewhere) still sends that one request; nothing comes back.
   Subresources (CDNs, images, scripts) may come from any public host.
 - **SSRF: egress proxy.** Every browser request — navigations, redirect hops, subresources,
   fetch/XHR, WebSockets — goes through `browser/egress.py`, which resolves the target itself,
   refuses loopback/private/link-local/reserved/metadata addresses, and connects to exactly the
-  address it checked (no DNS rebinding window). The router additionally refuses IP literals and
+  address it checked (no DNS rebinding window). The router also refuses IP literals and
   `localhost` names up front. Service workers are disabled so nothing bypasses either layer.
-- No `eval`/JavaScript action is exposed to the model.
-- Page content reaches the model inside `<page_content>` delimiters and is declared untrusted.
-- Clicks/submits that look irreversible (pay, buy, delete, send, ยืนยัน, ลบ, …) always pause for
-  human approval — a code policy, not a prompt request. It matches words on the element, so a
-  button like "Complete order" without such a word is not caught yet (phase 4.2).
-- Three loop guards: `BU_MAX_STEPS`, `BU_BUDGET_USD`, `BU_RUN_TIMEOUT_S`; per-tenant rate limit,
-  active-run limit and a cap on client-requested budgets.
-- Text typed into password fields is masked in events. Credentials written into the task text
-  itself are stored with the task — keep them out until secret placeholders land (phase 4.4).
+- **Prompt injection.** Page content (and dialogs, and Extract text) reaches the model between
+  delimiters with a random boundary the page cannot know; tags inside are defused, and the task
+  is restated after the page. No `eval`/JavaScript action exists. With a real model this is
+  mitigation, not proof — which is why everything else on this list does not depend on it.
+- **Human gate.** Clicks/Enter that pay, order, send, delete or confirm (Thai included); any
+  form submit except search and login; any click in a payment form and "Continue"-style buttons
+  on checkout pages; typing into payment fields (unless it is a stored secret) — all pause for
+  approval, whatever the model wants.
+- **Loop guards.** `BU_MAX_STEPS`, `BU_BUDGET_USD`, `BU_RUN_TIMEOUT_S`; repeated actions trigger
+  reflection; monthly caps; per-tenant rate limit and active-run limit; observations are capped
+  (`BU_OBSERVATION_MAX_CHARS`) so a huge page cannot flood the prompt.
+- **Credentials** only as `{{SECRET:name}}` (above). Text typed into password fields is masked in
+  events.

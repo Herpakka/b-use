@@ -7,6 +7,7 @@ short and never include secrets.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from playwright.async_api import Error as PlaywrightError
@@ -17,6 +18,8 @@ from browser.dom import FINGERPRINT_JS, ElementRef, page_text
 from browser.guards import navigation_reason
 from browser.models import ActionResult, clip_message, short_url
 from browser.settle import settle
+from core.domains import url_host
+from core.secrets import PLACEHOLDER, Secret, fill_placeholders, secret_names
 
 if TYPE_CHECKING:
     from browser.session import BrowserSession
@@ -114,8 +117,13 @@ async def _after_interaction(
 
 
 async def execute_action(
-    session: BrowserSession, action: AnyAction, *, expected_version: str | None = None
+    session: BrowserSession,
+    action: AnyAction,
+    *,
+    expected_version: str | None = None,
+    secrets: Mapping[str, Secret] | None = None,
 ) -> ActionResult:
+    """``secrets`` holds the values for ``{{SECRET:name}}`` placeholders in a TypeText."""
     page = await session.current_page()
     settings = session.settings
     ref: ElementRef | None = None
@@ -143,6 +151,10 @@ async def execute_action(
     try:
         match action:
             case Navigate():
+                if PLACEHOLDER.search(action.url):
+                    return _result(
+                        False, f"{label} → refused: secrets can only be typed into fields", page
+                    )
                 if reason := navigation_reason(action.url, session.policy.allowed_domains):
                     return _result(False, f"{label} → blocked: {reason}", page)
                 blocked_before = session.blocked_count
@@ -181,6 +193,19 @@ async def execute_action(
             case TypeText():
                 assert ref is not None
                 loc = _locator(ref)
+                text = action.text
+                if secret_names(text):
+                    if ref.tag == "select":
+                        return _result(
+                            False, f"{label} → refused: secrets go into text fields only", page
+                        )
+                    # The host of the element's own frame: an iframe on an allowed page is
+                    # judged by where it comes from.
+                    filled = fill_placeholders(text, secrets or {}, url_host(ref.frame.url))
+                    if isinstance(filled, str):
+                        return _result(False, f"{label} → refused: {filled}", page)
+                    text, used = filled
+                    session.redactor.add(used)  # before typing: every later read is masked
                 if ref.tag == "select":
                     try:
                         await loc.select_option(
@@ -191,7 +216,7 @@ async def execute_action(
                             value=action.text, timeout=settings.action_timeout_ms
                         )
                 else:
-                    await loc.fill(action.text, timeout=settings.action_timeout_ms)
+                    await loc.fill(text, timeout=settings.action_timeout_ms)
                 note = ""
                 if ref.tag == "select":
                     selected = await loc.evaluate(
@@ -224,7 +249,7 @@ async def execute_action(
                 return _result(True, f"{label} → {y}px above, {below}px below", page)
 
             case Extract():
-                text = await page_text(page, settings.extract_max_chars)
+                text = await page_text(page, settings.extract_max_chars, session.frame_allowed)
                 return _result(True, f"{label} → read {len(text)} chars", page, extracted_text=text)
 
             case Done():

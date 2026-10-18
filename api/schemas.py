@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator
 
 from core.store import RunEvent, RunRecord, RunStatus
 
@@ -44,6 +44,15 @@ class CreateRunRequest(BaseModel):
         return cleaned
 
 
+class SecretIn(BaseModel):
+    value: SecretStr = Field(description="Typed by the agent, never shown to it or returned.")
+    domains: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Hosts it may be typed on (subdomains included). Empty: any allowed domain.",
+    )
+
+
 class ResumeRequest(BaseModel):
     approved: bool = True
     answer: str = Field(default="", max_length=2000)
@@ -59,7 +68,11 @@ class RunOut(BaseModel):
     result: str | None
     failure_reason: str | None
     steps: int
+    budget_usd: float = Field(description="This run's USD cap.")
     cost_usd: float
+    cost_breakdown: dict[str, float] = Field(
+        description="USD per agent step kind: plan, decide, reflect, extract."
+    )
     tokens_in: int
     tokens_out: int
     pending: dict[str, Any] | None = Field(
@@ -75,6 +88,19 @@ class RunOut(BaseModel):
             **run.model_dump(exclude={"tenant", "session_id", "max_steps", "prompt_version"}),
             session=session_name(run.tenant, run.session_id),
         )
+
+
+class UsageOut(BaseModel):
+    month: str = Field(description="Calendar month (UTC), YYYY-MM.")
+    runs: int
+    cost_usd: float
+    committed_usd: float = Field(description="Spent, plus the full budget of active runs.")
+    tokens_in: int
+    tokens_out: int
+    budget_usd: float | None = Field(description="This tenant's monthly cap, if any.")
+    remaining_usd: float | None = Field(
+        description="What a new run may still use: the tenant's and the deployment's caps."
+    )
 
 
 class EventOut(BaseModel):

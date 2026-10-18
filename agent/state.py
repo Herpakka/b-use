@@ -7,9 +7,13 @@ history entries, which keeps the prompt size flat however long the run gets.
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
 RunStatus = Literal["running", "needs_human", "done", "failed"]
+
+
+def add_costs(a: dict[str, float], b: dict[str, float]) -> dict[str, float]:
+    return {k: a.get(k, 0.0) + b.get(k, 0.0) for k in a.keys() | b.keys()}
 
 
 class PendingTool(TypedDict):
@@ -22,6 +26,9 @@ class ElementBrief(TypedDict):
     name: str
     type: str | None
     role: str | None
+    # Missing in checkpoints from before phase 4.
+    field: NotRequired[str | None]  # "payment" | "password"
+    form: NotRequired[str | None]  # "payment" | "login" | "search" | "form"
 
 
 class Limits(TypedDict):
@@ -39,6 +46,9 @@ class AgentState(TypedDict):
     vision: bool
     limits: Limits
     prompt_version: str
+    # Whose secrets {{SECRET:name}} placeholders resolve to (the API's tenant; "" locally).
+    # Read with .get(): checkpoints written before phase 4 lack it.
+    secret_scope: str
 
     plan: list[str]
     notes: str | None  # advice from the last reflection or the human
@@ -64,6 +74,7 @@ class AgentState(TypedDict):
     reflections_in_row: int
 
     cost_usd: Annotated[float, operator.add]
+    node_costs: Annotated[dict[str, float], add_costs]  # plan/decide/reflect/extract
     tokens_in: Annotated[int, operator.add]
     tokens_out: Annotated[int, operator.add]
     started_at: float
@@ -84,6 +95,7 @@ def new_state(
     session_id: str | None = None,
     start_url: str | None = None,
     vision: bool = False,
+    secret_scope: str = "",
 ) -> AgentState:
     return AgentState(
         run_id=run_id,
@@ -94,6 +106,7 @@ def new_state(
         vision=vision,
         limits=limits,
         prompt_version=prompt_version,
+        secret_scope=secret_scope,
         plan=[],
         notes=None,
         observation=None,
@@ -113,6 +126,7 @@ def new_state(
         stale_in_row=0,
         reflections_in_row=0,
         cost_usd=0.0,
+        node_costs={},
         tokens_in=0,
         tokens_out=0,
         started_at=now,

@@ -25,6 +25,7 @@ from core.bus import LocalBus
 from core.config import Settings
 from core.costs import PriceTable
 from core.ratelimit import LocalRateLimiter
+from core.secrets import MemorySecretStore
 from core.store import MemoryRunStore
 from tests.agent_fakes import FakeBrowser, ScriptedChatModel, page
 from tests.conftest import make_settings
@@ -59,8 +60,10 @@ def memory_factory(
     saver: InMemorySaver | None = None,
     llm_delay: float = 0.0,
     with_llm: bool = True,
+    secrets: MemorySecretStore | None = None,
 ) -> ServicesFactory:
     run_store = store or MemoryRunStore()
+    secret_store = secrets or MemorySecretStore()
     checkpoints = saver or InMemorySaver()
 
     @asynccontextmanager
@@ -73,6 +76,7 @@ def memory_factory(
                 llm_small=ScriptedChatModel(script=list(small or [])),
                 settings=settings,
                 prices=PriceTable.from_settings(settings),
+                secrets=secret_store.get,
             )
             if with_llm
             else None
@@ -84,6 +88,7 @@ def memory_factory(
             graph=compile_graph(checkpoints),
             ctx=ctx,
             settings=settings,
+            secrets=secret_store,
         )
         await manager.recover()
         try:
@@ -94,6 +99,7 @@ def memory_factory(
                 limiter=LocalRateLimiter(),
                 browser=browser,
                 manager=manager,
+                secrets=secret_store,
             )
         finally:
             await manager.shutdown()

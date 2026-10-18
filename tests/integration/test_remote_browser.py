@@ -109,6 +109,10 @@ async def test_pool_drives_a_served_browser(endpoint: str, tmp_path: Path) -> No
             "() => fetch('https://internal.test/', {mode: 'no-cors'}).catch(() => null)"
         )
         assert any("internal.test" in target for _, target, _ in egress.blocked)
+        # the health probe works over the link too
+        assert await pool.probe() is None
+        health = pool.health()
+        assert health.ok and health.remote and health.sessions == 1
     finally:
         await pool.stop()
         await egress.stop()

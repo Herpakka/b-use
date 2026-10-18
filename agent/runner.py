@@ -54,6 +54,7 @@ def initial_state(
     start_url: str | None = None,
     vision: bool = False,
     limits: Limits | None = None,
+    secret_scope: str = "",
 ) -> AgentState:
     return new_state(
         run_id=run_id or new_run_id(),
@@ -65,6 +66,7 @@ def initial_state(
         session_id=session_id,
         start_url=start_url,
         vision=vision,
+        secret_scope=secret_scope,
     )
 
 

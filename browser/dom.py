@@ -122,6 +122,33 @@ EXTRACT_JS = (
     range.selectNodeContents(node);
     return inRegion(range.getBoundingClientRect());
   };
+  // Sensitive fields and the kind of form an element belongs to, for the approval policy.
+  const PAY = /(card.?(num|no\b)|cc.?num|credit.?card|cvv|cvc|csc|security.?code|expir|exp.?(date|month|year)|iban|routing.?num|account.?num|sort.?code|หมายเลขบัตร|บัตรเครดิต)/i;
+  const fieldKind = (el) => {
+    const tag = el.localName;
+    if (tag !== "input" && tag !== "select" && tag !== "textarea") return null;
+    const ac = (el.getAttribute("autocomplete") || "").toLowerCase();
+    if (/(^|\s)cc-/.test(ac)) return "payment";
+    if ((el.type || "").toLowerCase() === "password" || ac.includes("password")) return "password";
+    const hint = [el.name, el.id, el.getAttribute("placeholder"), el.getAttribute("aria-label")].join(" ");
+    return PAY.test(hint) ? "payment" : null;
+  };
+  const formCache = new WeakMap();
+  const formKind = (el) => {
+    const form = el.form || el.closest("form");
+    if (!form) return null;
+    let kind = formCache.get(form);
+    if (kind === undefined) {
+      const fields = Array.from(form.elements || []);
+      const kinds = fields.map(fieldKind);
+      kind = kinds.includes("payment") ? "payment"
+        : kinds.includes("password") ? "login"
+        : form.getAttribute("role") === "search" || fields.some((f) => (f.type || "").toLowerCase() === "search") ? "search"
+        : "form";
+      formCache.set(form, kind);
+    }
+    return kind;
+  };
   const record = (el, tag, rect) => {
     const index = idx++;
     if (token) el.setAttribute("data-bu-idx", token + "-" + index);
@@ -131,6 +158,7 @@ EXTRACT_JS = (
       placeholder: el.getAttribute("placeholder"), href: null, value: null, checked: null,
       disabled: !!el.disabled || el.getAttribute("aria-disabled") === "true", options: null,
       in_viewport: rect.bottom >= 0 && rect.top <= vh, fp: fingerprint(el),
+      field: fieldKind(el), form: formKind(el),
     };
     if (tag === "a") e.href = el.href || el.getAttribute("href");
     if (tag === "input" || tag === "textarea") {
@@ -336,16 +364,21 @@ def _extract_line(e: dict[str, Any]) -> str:
     return name
 
 
-async def page_text(page: Page, max_chars: int) -> str:
+async def page_text(
+    page: Page, max_chars: int, frame_allowed: Callable[[str], bool] | None = None
+) -> str:
     """Whole-page text for Extract, in reading order.
 
     Unlike ``innerText`` it includes form state (selected options, typed values, checkboxes),
-    image alt text and attribute-only labels such as rating classes.
+    image alt text and attribute-only labels such as rating classes. ``frame_allowed`` filters
+    child frames exactly as in ``build_observation``.
     """
     viewport_height = (page.viewport_size or {"height": 800})["height"]
     main = page.main_frame
     chunks: list[str] = []
     for frame in [main, *(f for f in page.frames if f is not main)]:
+        if frame is not main and frame_allowed is not None and not frame_allowed(frame.url):
+            continue
         if frame is not main and not await _frame_on_screen(frame, viewport_height, _WHOLE_PAGE_PX):
             continue
         try:

@@ -291,6 +291,19 @@ def test_debug_page_and_root_redirect() -> None:
         assert client.get("/debug").status_code == 404
 
 
+def test_readiness_is_separate_from_liveness() -> None:
+    with client_for(happy_factory()) as client:
+        res = client.get("/readyz")
+        assert res.status_code == 200, res.text
+        checks = res.json()["checks"]
+        assert checks["database"] == checks["bus"] == checks["llm"] == "ok"
+        assert checks["browser"]["ok"] is True
+    with client_for(memory_factory(FakeBrowser(), [], with_llm=False)) as client:
+        assert client.get("/healthz").status_code == 200
+        res = client.get("/readyz")
+        assert res.status_code == 503 and "BU_OPENAI_API_KEY" in res.json()["checks"]["llm"]
+
+
 def test_openapi_lists_the_public_routes() -> None:
     with client_for(happy_factory()) as client:
         paths = set(client.get("/openapi.json").json()["paths"])
@@ -304,6 +317,10 @@ def test_openapi_lists_the_public_routes() -> None:
         "/v1/runs/{run_id}/events",
         "/v1/sessions",
         "/v1/sessions/{name}",
+        "/v1/secrets",
+        "/v1/secrets/{name}",
+        "/v1/usage",
+        "/readyz",
     } <= paths
 
 

@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Checkout</title></head>
+<body>
+  <h1>Payment</h1>
+  <form id="pay" method="post" action="/checkout/done">
+    <label>Card number <input name="cardnumber" autocomplete="cc-number"></label>
+    <label>Expiry <input name="exp" autocomplete="cc-exp"></label>
+    <label>Name on card <input name="holder"></label>
+    <button type="button" id="cont" onclick="document.getElementById('status').textContent='charged'">Continue</button>
+  </form>
+  <p id="status"></p>
+  <form role="search" action="/search/results.html"><input type="search" name="q" aria-label="Search"><button>Go</button></form>
+  <form id="login" action="/login.html" method="get"><input name="email" aria-label="Email"><input type="password" name="pw" aria-label="Password"><button>Sign in</button></form>
+  <a href="/static.html">Back to shop</a>
+</body>
+</html>

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -22,9 +22,17 @@ from agent.context import AgentContext
 from agent.graph import AgentGraph, compile_graph
 from agent.runner import HumanHandler, drive, initial_state, limits_from
 from browser.actions import AnyAction, Extract, Navigate
-from browser.models import ActionResult, ElementInfo, Observation, ScrollState, SessionInfo
+from browser.models import (
+    ActionResult,
+    BrowserHealth,
+    ElementInfo,
+    Observation,
+    ScrollState,
+    SessionInfo,
+)
 from browser.service import SessionNotFoundError
 from core.costs import PriceTable
+from core.secrets import Secret, SecretResolver
 from tests.conftest import make_settings
 
 JPEG_MAGIC = bytes([0xFF, 0xD8, 0xFF])
@@ -121,8 +129,10 @@ class FakeBrowser:
         self.url = "about:blank"
         self.sessions: set[str] = set()
         self.executed: list[AnyAction] = []
-        self.closed: list[str] = []
+        self.closed: list[str] = []  # closed with cookies saved
+        self.forgotten: list[str] = []  # closed with cookies deleted
         self.held: set[str] = set()
+        self.secrets: list[dict[str, Secret]] = []  # the values handed over with each action
         self._version = 0
 
     def _require(self, session_id: str) -> None:
@@ -144,10 +154,16 @@ class FakeBrowser:
         return base.model_copy(update={"dom_version": f"v{self._version}", "url": self.url})
 
     async def execute(
-        self, session_id: str, action: AnyAction, *, expected_version: str | None = None
+        self,
+        session_id: str,
+        action: AnyAction,
+        *,
+        expected_version: str | None = None,
+        secrets: Mapping[str, Secret] | None = None,
     ) -> ActionResult:
         self._require(session_id)
         self.executed.append(action)
+        self.secrets.append(dict(secrets or {}))
         if isinstance(action, Navigate):
             self.url = action.url
             return ActionResult(ok=True, message=f"navigate {action.url} → ok", url=self.url)
@@ -173,6 +189,10 @@ class FakeBrowser:
         self.sessions.discard(session_id)
         self.closed.append(session_id)
 
+    async def forget(self, session_id: str) -> None:
+        self.sessions.discard(session_id)
+        self.forgotten.append(session_id)
+
     async def hold(self, session_id: str, held: bool) -> None:
         (self.held.add if held else self.held.discard)(session_id)
 
@@ -181,6 +201,9 @@ class FakeBrowser:
             SessionInfo(id=sid, url=self.url, tabs=1, idle_s=0.0, busy=False)
             for sid in sorted(self.sessions)
         ]
+
+    async def health(self) -> BrowserHealth:
+        return BrowserHealth(ok=True, detail="ok", sessions=len(self.sessions), max_sessions=4)
 
     async def screencast(self, session_id: str) -> AsyncIterator[bytes]:
         self._require(session_id)
@@ -205,6 +228,7 @@ def make_ctx(
     small: list[AIMessage] | None = None,
     *,
     clock: Callable[[], float] | None = None,
+    secrets: SecretResolver | None = None,
     **settings: object,
 ) -> AgentContext:
     s = make_settings(Path("unused-sessions"), **settings)
@@ -215,6 +239,7 @@ def make_ctx(
         settings=s,
         prices=PriceTable.from_settings(s),
         clock=clock or StepClock(),
+        secrets=secrets,
     )
 
 
@@ -226,6 +251,7 @@ async def run_task(
     on_human: HumanHandler | None = None,
     saver: BaseCheckpointSaver[Any] | None = None,
     run_id: str | None = None,
+    secret_scope: str = "",
 ) -> tuple[dict[str, Any], dict[str, Any] | None, AgentGraph]:
     graph = compile_graph(saver or InMemorySaver())
     limits = limits_from(ctx.settings)
@@ -236,6 +262,7 @@ async def run_task(
         start_url=start_url,
         run_id=run_id,
         limits=limits,
+        secret_scope=secret_scope,
     )
     final, pending = await drive(
         graph, ctx, state["run_id"], state, max_steps=limits["max_steps"], on_human=on_human

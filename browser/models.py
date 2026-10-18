@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
@@ -23,6 +24,10 @@ class ElementInfo(BaseModel):
     options: list[str] | None = None
     frame: str | None = None
     in_viewport: bool = True
+    # For the approval policy (not rendered): "payment" / "password" for sensitive fields, and
+    # the kind of form the element sits in: "payment", "login", "search" or "form".
+    field: str | None = None
+    form: str | None = None
 
 
 class ScrollState(BaseModel):
@@ -41,9 +46,41 @@ class Observation(BaseModel):
     scroll: ScrollState
     tabs: int = 1
     dialogs: list[str] = Field(default_factory=list)
+    notices: list[str] = Field(default_factory=list)  # e.g. a crashed tab was reopened
     blocked: list[str] = Field(default_factory=list)
     truncated: bool = False
     screenshot_b64: str | None = None
+
+    def map_text(self, fn: Callable[[str], str]) -> Observation:
+        """A copy with ``fn`` applied to every string that came from the page."""
+
+        def opt(v: str | None) -> str | None:
+            return None if v is None else fn(v)
+
+        elements = [
+            e.model_copy(
+                update={
+                    "name": fn(e.name),
+                    "placeholder": opt(e.placeholder),
+                    "href": opt(e.href),
+                    "value": opt(e.value),
+                    "options": None if e.options is None else [fn(o) for o in e.options],
+                    "frame": opt(e.frame),
+                }
+            )
+            for e in self.elements
+        ]
+        return self.model_copy(
+            update={
+                "url": fn(self.url),
+                "title": fn(self.title),
+                "elements": elements,
+                "outline": [i if isinstance(i, int) else fn(i) for i in self.outline],
+                "dialogs": [fn(d) for d in self.dialogs],
+                "notices": [fn(n) for n in self.notices],
+                "blocked": [fn(b) for b in self.blocked],
+            }
+        )
 
     def element(self, index: int) -> ElementInfo | None:
         return next((e for e in self.elements if e.index == index), None)
@@ -53,6 +90,7 @@ class Observation(BaseModel):
         head = [f"URL: {self.url}", f"Title: {self.title}"]
         if self.tabs > 1:
             head.append(f"Open tabs: {self.tabs} (you are on the newest one)")
+        head += [f"Notice: {n}" for n in self.notices]
         head += [f"Dialog auto-dismissed: {d}" for d in self.dialogs]
         head += [f"Blocked by network policy: {b}" for b in self.blocked]
         head.append(
@@ -94,6 +132,16 @@ class SessionInfo(BaseModel):
     idle_s: float
     busy: bool
     held: bool = False
+
+
+class BrowserHealth(BaseModel):
+    ok: bool
+    detail: str  # "ok", or why not ("not connected", "no answer within 10s", …)
+    version: str | None = None
+    remote: bool = False
+    sessions: int = 0
+    max_sessions: int = 0
+    restarts: int = 0
 
 
 def short_url(url: str, base: str | None = None, limit: int = 80) -> str:

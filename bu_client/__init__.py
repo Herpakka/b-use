@@ -173,7 +173,9 @@ class Client:
                 if event.type == "needs_human":
                     if on_human is None:
                         return self.get_run(run_id)
-                    self.resume(run_id, **on_human(event.data))
+                    # The event log is PII-redacted; the run record has the question as asked.
+                    pending = self.get_run(run_id).get("pending") or event.data
+                    self.resume(run_id, **on_human(pending))
             run = self.get_run(run_id)
             if run["status"] in TERMINAL:
                 return run

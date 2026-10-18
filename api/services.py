@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -14,6 +14,7 @@ from psycopg_pool import AsyncConnectionPool
 from agent.context import AgentContext
 from agent.graph import compile_graph
 from agent.llm import make_chat_model
+from api.janitor import Janitor
 from api.manager import RunManager
 from browser.local import local_browser
 from browser.service import BrowserService
@@ -22,6 +23,7 @@ from core.config import Settings
 from core.costs import PriceTable
 from core.logging import get_logger
 from core.ratelimit import LocalRateLimiter, RateLimiter, RedisRateLimiter
+from core.secrets import MemorySecretStore, PostgresSecretStore, SecretCipher, SecretStore
 from core.store import PostgresRunStore, RunStore
 
 log = get_logger("api.services")
@@ -35,12 +37,15 @@ class Services:
     limiter: RateLimiter
     browser: BrowserService
     manager: RunManager
+    secrets: SecretStore = field(default_factory=MemorySecretStore)
 
 
 ServicesFactory = Callable[[Settings], AbstractAsyncContextManager[Services]]
 
 
-def agent_context(settings: Settings, browser: BrowserService) -> AgentContext | None:
+def agent_context(
+    settings: Settings, browser: BrowserService, secrets: SecretStore | None = None
+) -> AgentContext | None:
     if settings.openai_api_key is None:
         log.warning("openai_key_missing", hint="runs are refused until BU_OPENAI_API_KEY is set")
         return None
@@ -52,6 +57,7 @@ def agent_context(settings: Settings, browser: BrowserService) -> AgentContext |
         llm_small=make_chat_model(settings, settings.model_small),
         settings=settings,
         prices=prices,
+        secrets=secrets.get if secrets is not None else None,
     )
 
 
@@ -73,6 +79,11 @@ async def build_services(settings: Settings) -> AsyncIterator[Services]:
         await store.setup()
         saver = AsyncPostgresSaver(pool)
         await saver.setup()
+        cipher = SecretCipher.from_setting(settings.secrets_key)
+        secrets = PostgresSecretStore(pool, cipher)
+        await secrets.setup()
+        if cipher is None:
+            log.info("secrets_disabled", hint="set BU_SECRETS_KEY to use {{SECRET:name}}")
 
         bus: EventBus
         limiter: RateLimiter
@@ -89,11 +100,15 @@ async def build_services(settings: Settings) -> AsyncIterator[Services]:
             bus=bus,
             browser=browser,
             graph=compile_graph(saver),
-            ctx=agent_context(settings, browser),
+            ctx=agent_context(settings, browser, secrets if secrets.available else None),
             settings=settings,
+            secrets=secrets if secrets.available else None,
         )
         stack.push_async_callback(manager.shutdown)
         await manager.recover()
+        janitor = Janitor(store, saver, settings)
+        janitor.start()
+        stack.push_async_callback(janitor.stop)
         yield Services(
             settings=settings,
             store=store,
@@ -101,4 +116,5 @@ async def build_services(settings: Settings) -> AsyncIterator[Services]:
             limiter=limiter,
             browser=browser,
             manager=manager,
+            secrets=secrets,
         )

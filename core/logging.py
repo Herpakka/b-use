@@ -9,14 +9,18 @@ from typing import Any, cast
 import structlog
 from structlog.typing import FilteringBoundLogger, Processor
 
+from core.redact import structlog_processor
 
-def configure_logging(level: str = "INFO", *, json: bool = True) -> None:
+
+def configure_logging(level: str = "INFO", *, json: bool = True, redact: bool = True) -> None:
+    """``redact`` masks e-mails, phone/card/ID numbers and API keys in every line."""
     processors: list[Processor] = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
+        *([structlog_processor] if redact else []),
         structlog.processors.JSONRenderer() if json else structlog.dev.ConsoleRenderer(),
     ]
     structlog.configure(

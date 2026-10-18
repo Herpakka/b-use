@@ -47,5 +47,7 @@ async def reflect_node(state: AgentState, runtime: Runtime[AgentContext]) -> dic
         "signatures": [],  # give the new approach a clean slate for loop detection
         "errors_in_row": 0,
         "history": [f"↺ reflected: {diagnosis}"],
-        **usage_update(ctx, ctx.settings.model_decide, call.tokens_in, call.tokens_out),
+        **usage_update(
+            ctx, ctx.settings.model_decide, call.tokens_in, call.tokens_out, node="reflect"
+        ),
     }

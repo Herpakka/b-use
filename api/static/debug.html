@@ -93,7 +93,7 @@
       </form>
     </section>
     <section>
-      <div class="row" style="justify-content:space-between"><h2>Runs</h2><button id="refresh">↻</button></div>
+      <div class="row" style="justify-content:space-between"><h2>Runs</h2><span id="usage" class="muted"></span><button id="refresh">↻</button></div>
       <ul id="runs" class="runs"></ul>
     </section>
   </div>
@@ -168,6 +168,9 @@ async function loadRuns() {
   try {
     const runs = await (await api("/v1/runs?limit=50")).json();
     text($("auth-state"), "✓ connected");
+    const u = await (await api("/v1/usage")).json();
+    text($("usage"), `${u.month}: ${fmtCost(u.cost_usd)} spent` +
+      (u.remaining_usd === null ? "" : ` · ${fmtCost(u.remaining_usd)} left`));
     const ul = $("runs");
     ul.replaceChildren(...runs.map((r) => {
       const li = document.createElement("li");
@@ -199,8 +202,10 @@ async function refreshRun() {
   text(badge, r.status);
   text($("r-id"), r.id);
   text($("r-task"), r.task);
+  const parts = Object.entries(r.cost_breakdown || {}).map(([k, v]) => `${k} ${fmtCost(v)}`);
   text($("r-meta"), `${r.allowed_domains.join(", ")} · session ${r.session} · ${r.steps} steps · ` +
-    `${fmtCost(r.cost_usd)} · ${r.tokens_in} in / ${r.tokens_out} out tokens`);
+    `${fmtCost(r.cost_usd)} of ${fmtCost(r.budget_usd)}` + (parts.length ? ` (${parts.join(", ")})` : "") +
+    ` · ${r.tokens_in} in / ${r.tokens_out} out tokens`);
   $("cancel").disabled = ["done", "failed", "cancelled"].includes(r.status);
   const res = $("r-result");
   if (r.result || r.failure_reason) {

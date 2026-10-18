@@ -15,45 +15,31 @@ import socket
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from playwright.async_api import BrowserContext, Request, Route, WebSocketRoute
 
+from core.domains import domain_allowed, normalize_domain, normalize_domains
+from core.domains import url_host as _host
 from core.logging import get_logger
+
+__all__ = [
+    "NetworkPolicy",
+    "domain_allowed",
+    "embedded_url_reason",
+    "host_reason",
+    "install_routes",
+    "ip_reason",
+    "navigation_reason",
+    "normalize_domain",
+    "normalize_domains",
+]
 
 log = get_logger("browser.guards")
 
 BLOCKABLE_RESOURCES = frozenset({"image", "font", "media"})
 _METADATA_HOSTS = frozenset({"metadata.google.internal", "metadata", "instance-data"})
 _DNS_TTL_S = 60.0
-
-
-def normalize_domain(domain: str) -> str:
-    d = domain.strip().lower().rstrip(".")
-    d = d.removeprefix("*.").removeprefix(".")
-    if "://" in d:
-        d = urlsplit(d).hostname or ""
-    try:
-        return d.encode("idna").decode("ascii")
-    except UnicodeError:
-        return d
-
-
-def normalize_domains(domains: Iterable[str]) -> tuple[str, ...]:
-    return tuple(sorted({n for d in domains if (n := normalize_domain(d))}))
-
-
-def _host(url: str) -> str | None:
-    try:
-        host = urlsplit(url).hostname
-    except ValueError:
-        return None
-    if not host:
-        return None
-    try:
-        return host.rstrip(".").encode("idna").decode("ascii").lower()
-    except UnicodeError:
-        return host.lower()
 
 
 def ip_reason(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
@@ -75,10 +61,6 @@ def host_reason(host: str) -> str | None:
     return ip_reason(ip)
 
 
-def domain_allowed(host: str, allowed: Iterable[str]) -> bool:
-    return any(host == d or host.endswith("." + d) for d in allowed)
-
-
 def navigation_reason(url: str, allowed: Iterable[str]) -> str | None:
     """Why a navigation to ``url`` must be refused, or None. Pure: no DNS."""
     if url == "about:blank":
@@ -93,6 +75,39 @@ def navigation_reason(url: str, allowed: Iterable[str]) -> str | None:
         return reason
     if not domain_allowed(host, allowed):
         return f"{host} is not in the allowed domains"
+    return embedded_url_reason(url, allowed)
+
+
+# Browsers read a backslash as "/" and ignore extra slashes in http(s) URLs ("/\evil", "///evil").
+_EMBEDDED = re.compile(r"^(?:https?:)?/{2,}([^/?#\s]+)", re.IGNORECASE)
+
+
+def embedded_url_reason(url: str, allowed: Iterable[str]) -> str | None:
+    """Refuse URLs that carry a link to a non-allowed host in their query or fragment.
+
+    That is the shape of an open redirect (``allowed.site/out?url=https://elsewhere/?data=…``):
+    the router never sees redirect hops, so without this check the request to the other host
+    would leave the browser — together with whatever the URL carries — before the allow-list
+    check after the redirect could undo the navigation.
+    """
+    parts = urlsplit(url)
+    allowed = tuple(allowed)
+    for raw in (parts.query, parts.fragment):
+        if not raw:
+            continue
+        # The whole string too: "#https://…" or "?https://…" carry the link without a key.
+        values = [raw, *(v for _, v in parse_qsl(raw, keep_blank_values=True))]
+        for value in values:
+            for _ in range(3):  # links are often encoded more than once
+                link = value.strip().replace("\\", "/")
+                if (m := _EMBEDDED.match(link)) and (host := _host("http://" + m[1])):
+                    if host_reason(host) or not domain_allowed(host, allowed):
+                        return f"URL embeds a link to {host}, outside the allowed domains"
+                    break
+                decoded = unquote(value)
+                if decoded == value:
+                    break
+                value = decoded
     return None
 
 
